@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import os
 
+from accloud.endpoints import BASE_URL
+
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
@@ -21,7 +23,7 @@ class RetryConfig:
 
 @dataclass(frozen=True, slots=True)
 class AppConfig:
-    base_url: str = "https://api.anycubic.example"
+    base_url: str = BASE_URL
     user_agent: str = "manager-anycubic-cloud/0.1.0"
     timeout_s: float = 20.0
     session_path: Path = Path(".accloud/session.json")
@@ -56,4 +58,3 @@ class AppConfig:
             enable_fault_handler=_env_bool("ACCLOUD_ENABLE_FAULT_HANDLER", True),
             log_level=os.getenv("ACCLOUD_LOG_LEVEL", "INFO").upper(),
         )
-

@@ -1,10 +1,21 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Callable
+
 from gui.qt_compat import require_qt
-from gui.widgets import connect_stub_action, make_panel
+from gui.widgets import make_panel
 
 
-def build_session_settings_dialog(parent=None):
+ImportHarCallback = Callable[[Path, Path, str], tuple[bool, str]]
+
+
+def build_session_settings_dialog(
+    parent=None,
+    *,
+    default_session_path: str = ".accloud/session.json",
+    on_import_har: ImportHarCallback | None = None,
+):
     _qtcore, qtwidgets = require_qt()
     dialog = qtwidgets.QDialog(parent)
     dialog.setWindowTitle("Session Settings")
@@ -17,7 +28,7 @@ def build_session_settings_dialog(parent=None):
     title = qtwidgets.QLabel("Session Settings")
     title.setObjectName("title")
     title.setStyleSheet("font-size: 24px;")
-    subtitle = qtwidgets.QLabel("Design preview only. Session behavior will be wired in phase 3.")
+    subtitle = qtwidgets.QLabel("HAR import is active in phase 3.")
     subtitle.setObjectName("subtitle")
     layout.addWidget(title)
     layout.addWidget(subtitle)
@@ -31,7 +42,7 @@ def build_session_settings_dialog(parent=None):
     har_path.setPlaceholderText("/path/to/session.har")
     import_layout.addRow("HAR file", har_path)
 
-    session_path = qtwidgets.QLineEdit(".accloud/session.json")
+    session_path = qtwidgets.QLineEdit(default_session_path)
     import_layout.addRow("Session target", session_path)
 
     strategy = qtwidgets.QComboBox()
@@ -48,14 +59,59 @@ def build_session_settings_dialog(parent=None):
     info_layout.addWidget(qtwidgets.QLabel("- Session file permissions are expected to be 0600."))
     layout.addWidget(info_panel)
 
+    status = qtwidgets.QLabel("")
+    status.setObjectName("subtitle")
+    layout.addWidget(status)
+
+    def _browse_har() -> None:
+        selected, _selected_filter = qtwidgets.QFileDialog.getOpenFileName(
+            dialog,
+            "Select HAR file",
+            "",
+            "HAR files (*.har);;JSON files (*.json);;All files (*)",
+        )
+        if selected:
+            har_path.setText(selected)
+
+    def _import_har() -> None:
+        raw_har = har_path.text().strip()
+        if not raw_har:
+            qtwidgets.QMessageBox.warning(dialog, "Missing input", "Please select a HAR file.")
+            return
+        har_file = Path(raw_har)
+        if not har_file.exists():
+            qtwidgets.QMessageBox.warning(dialog, "File not found", f"HAR file does not exist:\n{har_file}")
+            return
+
+        raw_session_path = session_path.text().strip()
+        if not raw_session_path:
+            qtwidgets.QMessageBox.warning(dialog, "Missing input", "Please provide a target session path.")
+            return
+
+        mode = "merge" if strategy.currentIndex() == 0 else "replace"
+        if on_import_har is None:
+            qtwidgets.QMessageBox.information(
+                dialog,
+                "Not wired",
+                "No import callback is configured.",
+            )
+            return
+
+        ok, message = on_import_har(har_file, Path(raw_session_path), mode)
+        status.setText(message)
+        if ok:
+            qtwidgets.QMessageBox.information(dialog, "Session updated", message)
+        else:
+            qtwidgets.QMessageBox.critical(dialog, "Import failed", message)
+
     buttons = qtwidgets.QHBoxLayout()
     browse = qtwidgets.QPushButton("Browse HAR")
     import_btn = qtwidgets.QPushButton("Import HAR")
     import_btn.setObjectName("primary")
     close = qtwidgets.QPushButton("Close")
 
-    connect_stub_action(browse, "Browse HAR file")
-    connect_stub_action(import_btn, "Import HAR session")
+    browse.clicked.connect(_browse_har)
+    import_btn.clicked.connect(_import_har)
     close.clicked.connect(dialog.reject)
 
     buttons.addWidget(browse)
@@ -64,4 +120,3 @@ def build_session_settings_dialog(parent=None):
     buttons.addWidget(import_btn)
     layout.addLayout(buttons)
     return dialog
-

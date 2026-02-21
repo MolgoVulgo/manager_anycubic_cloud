@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import math
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any
 
 
@@ -74,4 +75,36 @@ def backoff_seconds(attempt: int, base_delay_s: float, max_delay_s: float) -> fl
         raise ValueError("attempt must be >= 0")
     unclamped = base_delay_s * math.pow(2, attempt)
     return min(unclamped, max_delay_s)
+
+
+def safe_url_for_log(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.query:
+        return url
+    safe_query = []
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        if key.lower() in SENSITIVE_JSON_KEYS or "token" in key.lower() or "signature" in key.lower():
+            safe_query.append((key, "<redacted>"))
+        else:
+            safe_query.append((key, value))
+    return urlunparse(parsed._replace(query=urlencode(safe_query)))
+
+
+def format_bytes(num_bytes: int) -> str:
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    units = ["KB", "MB", "GB", "TB", "PB"]
+    value = float(num_bytes)
+    unit_index = -1
+    while value >= 1024.0 and unit_index < len(units) - 1:
+        value /= 1024.0
+        unit_index += 1
+    return f"{value:.1f} {units[unit_index]}"
+
+
+def pick_first(data: Mapping[str, Any], *keys: str, default: Any = None) -> Any:
+    for key in keys:
+        if key in data:
+            return data[key]
+    return default
 

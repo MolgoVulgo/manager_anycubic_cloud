@@ -1,16 +1,33 @@
-"""Source of truth for API routes (phase 1 placeholder)."""
+"""Source of truth for API routes (phase 3 baseline)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
 
 BASE_URL = "https://api.anycubic.example"
 
-ENDPOINTS: dict[str, dict[str, str]] = {
-    "quota": {"method": "GET", "path": "/quota"},
-    "files": {"method": "GET", "path": "/files"},
-    "file_details": {"method": "GET", "path": "/files/{file_id}"},
-    "gcode_info": {"method": "GET", "path": "/files/{file_id}/gcode"},
-    "download": {"method": "GET", "path": "/files/{file_id}/download"},
-    "upload": {"method": "POST", "path": "/files/upload"},
-    "delete": {"method": "DELETE", "path": "/files/{file_id}"},
-    "print_order": {"method": "POST", "path": "/print/orders"},
-    "printers": {"method": "GET", "path": "/printers"},
+
+@dataclass(frozen=True, slots=True)
+class Endpoint:
+    method: str
+    path: str
+
+
+ENDPOINTS: dict[str, Endpoint] = {
+    "quota": Endpoint(method="GET", path="/quota"),
+    "files": Endpoint(method="GET", path="/files"),
+    "file_details": Endpoint(method="GET", path="/files/{file_id}"),
+    "gcode_info": Endpoint(method="GET", path="/files/{file_id}/gcode"),
+    "download": Endpoint(method="GET", path="/files/{file_id}/download"),
+    "upload": Endpoint(method="POST", path="/files/upload"),
+    "delete": Endpoint(method="DELETE", path="/files/{file_id}"),
+    "print_order": Endpoint(method="POST", path="/print/orders"),
+    "printers": Endpoint(method="GET", path="/printers"),
 }
+
+
+def endpoint_path(name: str, **params: str) -> str:
+    endpoint = ENDPOINTS[name]
+    return endpoint.path.format(**params)
 
