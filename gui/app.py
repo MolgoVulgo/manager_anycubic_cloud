@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import faulthandler
 import logging
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 import sys
 
@@ -22,10 +23,38 @@ from gui.theme import Theme
 
 
 def _configure_logging(config: AppConfig) -> None:
-    logging.basicConfig(
-        level=getattr(logging, config.log_level, logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    root_logger = logging.getLogger()
+    level = getattr(logging, config.log_level, logging.INFO)
+    root_logger.setLevel(level)
+
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+        handler.close()
+
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(level)
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+
+    config.http_log_path.parent.mkdir(parents=True, exist_ok=True)
+    http_file_handler = TimedRotatingFileHandler(
+        filename=str(config.http_log_path),
+        when="midnight",
+        interval=1,
+        backupCount=config.http_log_retention_days,
+        encoding="utf-8",
     )
+    http_file_handler.setLevel(logging.DEBUG)
+    http_file_handler.setFormatter(formatter)
+
+    http_logger = logging.getLogger("accloud.http")
+    http_logger.setLevel(logging.DEBUG)
+    for handler in list(http_logger.handlers):
+        http_logger.removeHandler(handler)
+        handler.close()
+    http_logger.addHandler(http_file_handler)
+    http_logger.propagate = True
 
 
 def _enable_fault_handler(config: AppConfig) -> None:
@@ -264,7 +293,7 @@ def build_main_window(
         "Files",
     )
     tabs.addTab(build_printer_tab(window), "Printer")
-    tabs.addTab(build_log_tab(window), "Log")
+    tabs.addTab(build_log_tab(window, log_path=config.http_log_path), "Log")
     root_layout.addWidget(tabs, 1)
     return window
 

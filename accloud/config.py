@@ -28,6 +28,7 @@ class AppConfig:
     timeout_s: float = 20.0
     session_path: Path = Path.home() / ".config" / "acm" / "session.json"
     http_log_path: Path = Path("accloud_http.log")
+    http_log_retention_days: int = 14
     fault_log_path: Path = Path("accloud_fault.log")
     retry: RetryConfig = field(default_factory=RetryConfig)
     pool_kind: str = "threads"
@@ -48,6 +49,10 @@ class AppConfig:
             timeout_s=float(os.getenv("ACCLOUD_TIMEOUT_S", str(defaults.timeout_s))),
             session_path=Path(os.getenv("ACCLOUD_SESSION_PATH", str(defaults.session_path))),
             http_log_path=Path(os.getenv("ACCLOUD_HTTP_LOG_PATH", str(defaults.http_log_path))),
+            http_log_retention_days=max(
+                1,
+                int(os.getenv("ACCLOUD_HTTP_LOG_RETENTION_DAYS", str(defaults.http_log_retention_days))),
+            ),
             fault_log_path=Path(os.getenv("ACCLOUD_FAULT_LOG_PATH", str(defaults.fault_log_path))),
             retry=RetryConfig(
                 max_attempts=max(1, max_attempts),
