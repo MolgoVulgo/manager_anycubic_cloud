@@ -26,7 +26,7 @@ class AppConfig:
     base_url: str = BASE_URL
     user_agent: str = "manager-anycubic-cloud/0.1.0"
     timeout_s: float = 20.0
-    session_path: Path = Path(".accloud/session.json")
+    session_path: Path = Path.home() / ".config" / "acm" / "session.json"
     http_log_path: Path = Path("accloud_http.log")
     fault_log_path: Path = Path("accloud_fault.log")
     retry: RetryConfig = field(default_factory=RetryConfig)
@@ -37,24 +37,25 @@ class AppConfig:
 
     @classmethod
     def from_env(cls) -> "AppConfig":
+        defaults = cls()
         max_attempts = int(os.getenv("ACCLOUD_RETRY_MAX_ATTEMPTS", "3"))
         base_delay_s = float(os.getenv("ACCLOUD_RETRY_BASE_DELAY_S", "0.5"))
         max_delay_s = float(os.getenv("ACCLOUD_RETRY_MAX_DELAY_S", "5.0"))
 
         return cls(
-            base_url=os.getenv("ACCLOUD_BASE_URL", cls.base_url),
-            user_agent=os.getenv("ACCLOUD_USER_AGENT", cls.user_agent),
-            timeout_s=float(os.getenv("ACCLOUD_TIMEOUT_S", "20.0")),
-            session_path=Path(os.getenv("ACCLOUD_SESSION_PATH", ".accloud/session.json")),
-            http_log_path=Path(os.getenv("ACCLOUD_HTTP_LOG_PATH", "accloud_http.log")),
-            fault_log_path=Path(os.getenv("ACCLOUD_FAULT_LOG_PATH", "accloud_fault.log")),
+            base_url=os.getenv("ACCLOUD_BASE_URL", defaults.base_url),
+            user_agent=os.getenv("ACCLOUD_USER_AGENT", defaults.user_agent),
+            timeout_s=float(os.getenv("ACCLOUD_TIMEOUT_S", str(defaults.timeout_s))),
+            session_path=Path(os.getenv("ACCLOUD_SESSION_PATH", str(defaults.session_path))),
+            http_log_path=Path(os.getenv("ACCLOUD_HTTP_LOG_PATH", str(defaults.http_log_path))),
+            fault_log_path=Path(os.getenv("ACCLOUD_FAULT_LOG_PATH", str(defaults.fault_log_path))),
             retry=RetryConfig(
                 max_attempts=max(1, max_attempts),
                 base_delay_s=max(0.0, base_delay_s),
                 max_delay_s=max(0.0, max_delay_s),
             ),
-            pool_kind=os.getenv("ACCLOUD_POOL_KIND", "threads"),
-            workers=max(1, int(os.getenv("ACCLOUD_WORKERS", "4"))),
-            enable_fault_handler=_env_bool("ACCLOUD_ENABLE_FAULT_HANDLER", True),
-            log_level=os.getenv("ACCLOUD_LOG_LEVEL", "INFO").upper(),
+            pool_kind=os.getenv("ACCLOUD_POOL_KIND", defaults.pool_kind),
+            workers=max(1, int(os.getenv("ACCLOUD_WORKERS", str(defaults.workers)))),
+            enable_fault_handler=_env_bool("ACCLOUD_ENABLE_FAULT_HANDLER", defaults.enable_fault_handler),
+            log_level=os.getenv("ACCLOUD_LOG_LEVEL", defaults.log_level).upper(),
         )

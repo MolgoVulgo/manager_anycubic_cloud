@@ -76,6 +76,36 @@ def extract_session_from_har(har_path: Path, host_contains: str | None = "anycub
     return SessionData(cookies=cookies, headers=headers, tokens=tokens, metadata=metadata)
 
 
+def extract_tokens_from_har(har_path: Path, host_contains: str | None = "anycubic") -> SessionData:
+    with har_path.open("r", encoding="utf-8") as handle:
+        har = json.load(handle)
+
+    tokens: dict[str, str] = {}
+    metadata: dict[str, Any] = {"source": "har", "path": str(har_path)}
+
+    entries = _as_list(_as_dict(har.get("log")).get("entries"))
+    for entry in entries:
+        request = _as_dict(_as_dict(entry).get("request"))
+        url = str(request.get("url", "")).strip()
+        if host_contains and host_contains.lower() not in url.lower():
+            continue
+
+        for header in _as_list(request.get("headers")):
+            header_map = _as_dict(header)
+            name = str(header_map.get("name", "")).strip()
+            value = str(header_map.get("value", "")).strip()
+            if not name or not value:
+                continue
+            lowered = name.lower()
+            if lowered == "authorization":
+                tokens[name] = value
+            elif lowered.startswith("x-") and "token" in lowered:
+                tokens[name] = value
+
+    metadata["token_count"] = len(tokens)
+    return SessionData(tokens=tokens, metadata=metadata)
+
+
 def merge_sessions(base: SessionData, incoming: SessionData) -> SessionData:
     merged = SessionData(
         cookies={**base.cookies, **incoming.cookies},
@@ -105,4 +135,3 @@ def _as_list(value: Any) -> list[Any]:
     if isinstance(value, list):
         return value
     return []
-

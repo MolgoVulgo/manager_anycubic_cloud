@@ -9,7 +9,7 @@ from accloud.api import AnycubicCloudApi
 from accloud.client import CloudHttpClient
 from accloud.config import AppConfig
 from accloud.models import FileItem, Quota, SessionData
-from accloud.session_store import extract_session_from_har, load_session, merge_sessions, save_session
+from accloud.session_store import extract_tokens_from_har, load_session, merge_sessions, save_session
 from gui.dialogs.print_dialog import build_print_dialog
 from gui.dialogs.pwmb3d_dialog import build_pwmb3d_dialog
 from gui.dialogs.session_settings_dialog import ImportHarCallback, build_session_settings_dialog
@@ -38,6 +38,7 @@ def _enable_fault_handler(config: AppConfig) -> None:
 
 
 def _install_theme(app, theme: Theme) -> None:
+    app.setStyle("Fusion")
     app.setStyleSheet(theme.style_sheet())
 
 
@@ -58,24 +59,30 @@ def _open_viewer_dialog(owner) -> None:
 
 def _make_session_import_callback(
     *,
-    config: AppConfig,
     client: CloudHttpClient,
+    api: AnycubicCloudApi,
     logger: logging.Logger,
 ) -> ImportHarCallback:
-    def _import_har(har_path: Path, session_path: Path, mode: str) -> tuple[bool, str]:
+    def _import_har(har_path: Path, session_path: Path) -> tuple[bool, str]:
+        previous_session = client.session_data
         try:
-            incoming = extract_session_from_har(har_path)
+            incoming = extract_tokens_from_har(har_path)
+            if not incoming.tokens:
+                return False, "No token found in HAR file for Anycubic endpoints."
             current = client.session_data
-            merged = merge_sessions(current, incoming) if mode == "merge" else incoming
+            merged = merge_sessions(current, incoming)
             save_session(session_path, merged)
             client.update_session(merged)
-            logger.info(
-                "Session imported from HAR mode=%s cookies=%s tokens=%s",
-                mode,
-                len(merged.cookies),
-                len(merged.tokens),
-            )
-            return True, f"Session imported from {har_path.name} to {session_path}"
+
+            valid, validation_msg = _validate_connection(api=api, logger=logger)
+            if not valid:
+                # Roll back to the previous in-memory session when imported tokens are invalid.
+                client.update_session(previous_session)
+                save_session(session_path, previous_session)
+                return False, f"HAR import completed but token validation failed: {validation_msg}"
+
+            logger.info("Session token import valid tokens=%s", len(merged.tokens))
+            return True, f"Session imported and validated from {har_path.name}"
         except Exception as exc:  # pragma: no cover - runtime safety path
             logger.exception("HAR import failed: %s", exc)
             return False, f"HAR import failed: {exc}"
@@ -139,15 +146,59 @@ def _make_refresh_files_callback(
     return _refresh
 
 
+def _validate_connection(
+    *,
+    api: AnycubicCloudApi,
+    logger: logging.Logger,
+) -> tuple[bool, str]:
+    try:
+        api.get_quota()
+        api.list_files(page=1, page_size=1)
+        return True, "Connection validated."
+    except Exception as exc:
+        logger.warning("Connection validation failed: %s", exc)
+        return False, str(exc)
+
+
+def _ensure_session_ready(
+    *,
+    config: AppConfig,
+    client: CloudHttpClient,
+    api: AnycubicCloudApi,
+    logger: logging.Logger,
+) -> bool:
+    has_session_file = config.session_path.exists()
+    has_token = bool(client.session_data.tokens)
+
+    if has_session_file and has_token:
+        valid, _msg = _validate_connection(api=api, logger=logger)
+        if valid:
+            return True
+        logger.info("Session file exists but token is invalid. Opening HAR import dialog.")
+    else:
+        logger.info("No valid token in session file. Opening HAR import dialog.")
+
+    import_cb = _make_session_import_callback(client=client, api=api, logger=logger)
+    _open_session_settings_dialog(None, config=config, on_import_har=import_cb)
+
+    # Re-check after dialog close (user may have imported a valid HAR token).
+    has_token_after = bool(client.session_data.tokens)
+    if not has_token_after:
+        return False
+    valid_after, _msg_after = _validate_connection(api=api, logger=logger)
+    return valid_after
+
+
 def build_main_window(
     *,
     config: AppConfig,
     client: CloudHttpClient,
     api: AnycubicCloudApi,
+    auto_refresh_on_start: bool,
 ):
     _qtcore, qtwidgets = require_qt()
     logger = logging.getLogger("gui.app")
-    session_import_cb = _make_session_import_callback(config=config, client=client, logger=logger)
+    session_import_cb = _make_session_import_callback(client=client, api=api, logger=logger)
     refresh_cb = _make_refresh_files_callback(api=api, logger=logger)
 
     window = qtwidgets.QMainWindow()
@@ -208,7 +259,7 @@ def build_main_window(
             window,
             on_open_viewer=lambda: _open_viewer_dialog(window),
             on_refresh=refresh_cb,
-            auto_refresh=True,
+            auto_refresh=auto_refresh_on_start,
         ),
         "Files",
     )
@@ -225,10 +276,15 @@ def main(argv: list[str] | None = None) -> int:
     logger = logging.getLogger("gui.app")
 
     try:
-        _qtcore, qtwidgets = require_qt()
+        qtcore, qtwidgets = require_qt()
     except RuntimeError as exc:
         logger.error("%s", exc)
         return 2
+
+    qtcore.QCoreApplication.setAttribute(
+        qtcore.Qt.ApplicationAttribute.AA_DontUseNativeDialogs,
+        True,
+    )
 
     client = _create_cloud_client(config, logger)
     api = AnycubicCloudApi(client)
@@ -237,7 +293,14 @@ def main(argv: list[str] | None = None) -> int:
     app.aboutToQuit.connect(client.close)
     _install_theme(app, Theme())
 
-    window = build_main_window(config=config, client=client, api=api)
+    session_ready = _ensure_session_ready(config=config, client=client, api=api, logger=logger)
+
+    window = build_main_window(
+        config=config,
+        client=client,
+        api=api,
+        auto_refresh_on_start=session_ready,
+    )
     window.show()
     logger.info("GUI started in phase-3 cloud mode")
     return app.exec()

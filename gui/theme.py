@@ -37,6 +37,32 @@ class Theme:
             );
         }}
 
+        QDialog {{
+            background: {self.bg_root};
+        }}
+
+        QFileDialog,
+        QFileDialog QWidget {{
+            background: {self.bg_root};
+            color: {self.text_main};
+        }}
+
+        QFileDialog QTreeView,
+        QFileDialog QListView {{
+            background: {self.bg_card};
+            color: {self.text_main};
+            border: 1px solid {self.border_soft};
+            selection-background-color: {self.accent_primary};
+            selection-color: white;
+        }}
+
+        QFileDialog QHeaderView::section {{
+            background: {self.bg_panel};
+            color: {self.text_main};
+            border: 1px solid {self.border_soft};
+            padding: 4px 6px;
+        }}
+
         QWidget#tabRoot {{
             background: transparent;
         }}
