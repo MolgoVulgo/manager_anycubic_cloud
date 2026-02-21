@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "manager-anycubic-cloud"
+version = "0.1.0"
+description = "Anycubic Cloud client with PWMB 3D viewer skeleton"
+readme = "readme.md"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx>=0.27,<1.0",
+  "numpy>=1.26,<3.0",
+  "PySide6>=6.7,<7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0,<9.0",
+  "pytest-cov>=5.0,<6.0",
+  "mypy>=1.11,<2.0",
+  "ruff>=0.6,<1.0",
+]
+
+[project.scripts]
+manager-anycubic-cloud = "gui.app:main"
+
+[tool.setuptools.packages.find]
+include = ["accloud*", "pwmb*", "pwmb3d*", "gui*", "tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
