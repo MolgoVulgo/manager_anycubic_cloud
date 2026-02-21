@@ -8,13 +8,13 @@ import sys
 from accloud.config import AppConfig
 from gui.dialogs.print_dialog import build_print_dialog
 from gui.dialogs.pwmb3d_dialog import build_pwmb3d_dialog
+from gui.dialogs.session_settings_dialog import build_session_settings_dialog
 from gui.dialogs.upload_dialog import build_upload_dialog
 from gui.qt_compat import require_qt
 from gui.tabs.files_tab import build_files_tab
 from gui.tabs.log_tab import build_log_tab
 from gui.tabs.printer_tab import build_printer_tab
 from gui.theme import Theme
-from gui.widgets import connect_stub_action
 
 
 def _configure_logging(config: AppConfig) -> None:
@@ -49,6 +49,11 @@ def _open_print_dialog(owner) -> None:
 
 def _open_viewer_dialog(owner) -> None:
     dialog = build_pwmb3d_dialog(owner)
+    dialog.exec()
+
+
+def _open_session_settings_dialog(owner) -> None:
+    dialog = build_session_settings_dialog(owner)
     dialog.exec()
 
 
@@ -93,7 +98,7 @@ def build_main_window():
     view_btn.clicked.connect(lambda: _open_viewer_dialog(window))
 
     session_btn = qtwidgets.QPushButton("Session Settings")
-    connect_stub_action(session_btn, "Session settings")
+    session_btn.clicked.connect(lambda: _open_session_settings_dialog(window))
 
     for button in [session_btn, print_btn, view_btn, upload_btn]:
         header_layout.addWidget(button)
@@ -101,7 +106,7 @@ def build_main_window():
     root_layout.addWidget(header)
 
     tabs = qtwidgets.QTabWidget(root)
-    tabs.addTab(build_files_tab(window), "Files")
+    tabs.addTab(build_files_tab(window, on_open_viewer=lambda: _open_viewer_dialog(window)), "Files")
     tabs.addTab(build_printer_tab(window), "Printer")
     tabs.addTab(build_log_tab(window), "Log")
     root_layout.addWidget(tabs, 1)
@@ -130,4 +135,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

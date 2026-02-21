@@ -9,23 +9,59 @@ def _build_toolbar(parent=None):
     row = qtwidgets.QHBoxLayout()
     row.setSpacing(8)
 
-    import_button = qtwidgets.QPushButton("Import HAR")
     refresh_button = qtwidgets.QPushButton("Refresh")
     upload_button = qtwidgets.QPushButton("Upload .pwmb")
     upload_button.setObjectName("primary")
-    open_3d_button = qtwidgets.QPushButton("Open 3D Viewer")
 
     for widget, label in [
-        (import_button, "Import HAR"),
         (refresh_button, "Refresh files"),
         (upload_button, "Upload"),
-        (open_3d_button, "Open 3D viewer"),
     ]:
         connect_stub_action(widget, label)
         row.addWidget(widget)
 
     row.addStretch(1)
     return row
+
+
+def _make_thumbnail(file_name: str, parent=None):
+    _qtcore, qtwidgets = require_qt()
+    frame = make_panel(parent=parent, object_name="card")
+    frame.setFixedSize(100, 100)
+    frame.setStyleSheet(
+        frame.styleSheet()
+        + """
+        QFrame#card {
+            background: qlineargradient(
+                x1:0, y1:0, x2:1, y2:1,
+                stop:0 #dfe8d7, stop:0.5 #bfd3bd, stop:1 #93b39f
+            );
+            border: 1px solid #7f9b85;
+            border-radius: 10px;
+        }
+        QLabel {
+            color: #1f3527;
+        }
+        """
+    )
+    layout = qtwidgets.QVBoxLayout(frame)
+    layout.setContentsMargins(6, 6, 6, 6)
+    layout.setSpacing(2)
+
+    ext = file_name.split(".")[-1].upper()
+    ext_label = qtwidgets.QLabel(ext)
+    ext_label.setAlignment(_qtcore.Qt.AlignmentFlag.AlignCenter)
+    ext_label.setStyleSheet("font-size: 22px; font-weight: 700;")
+
+    size_label = qtwidgets.QLabel("100x100")
+    size_label.setAlignment(_qtcore.Qt.AlignmentFlag.AlignCenter)
+    size_label.setStyleSheet("font-size: 11px;")
+
+    layout.addStretch(1)
+    layout.addWidget(ext_label)
+    layout.addWidget(size_label)
+    layout.addStretch(1)
+    return frame
 
 
 def _build_filters(parent=None):
@@ -54,7 +90,7 @@ def _build_filters(parent=None):
     return panel
 
 
-def _file_cards(parent=None):
+def _file_cards(parent=None, on_open_viewer=None):
     _qtcore, qtwidgets = require_qt()
     files = [
         {
@@ -98,9 +134,16 @@ def _file_cards(parent=None):
 
     for file_info in files:
         card = make_panel(parent=container, object_name="cardAlt")
-        card_layout = qtwidgets.QVBoxLayout(card)
+        card_layout = qtwidgets.QHBoxLayout(card)
         card_layout.setContentsMargins(12, 12, 12, 12)
-        card_layout.setSpacing(8)
+        card_layout.setSpacing(12)
+
+        card_layout.addWidget(_make_thumbnail(file_info["name"], parent=card), 0)
+
+        right = qtwidgets.QWidget(card)
+        right_layout = qtwidgets.QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
 
         top = qtwidgets.QHBoxLayout()
         name = qtwidgets.QLabel(file_info["name"])
@@ -108,23 +151,27 @@ def _file_cards(parent=None):
         name.setStyleSheet("font-size: 18px; font-weight: 650;")
         top.addWidget(name, 1)
         top.addWidget(make_badge(file_info["status"][0], file_info["status"][1]))
-        card_layout.addLayout(top)
+        right_layout.addLayout(top)
 
         meta = qtwidgets.QLabel(
             f'Size: {file_info["size"]}   |   Updated: {file_info["updated"]}   |   Machine: {file_info["machine"]}'
         )
         meta.setObjectName("subtitle")
-        card_layout.addWidget(meta)
+        right_layout.addWidget(meta)
 
         actions = qtwidgets.QHBoxLayout()
-        for label in ["Details", "Print", "Download", "Delete", "Preview"]:
+        for label in ["Details", "Print", "Download", "Delete", "Open 3D Viewer"]:
             button = qtwidgets.QPushButton(label)
             if label == "Delete":
                 button.setObjectName("danger")
-            connect_stub_action(button, f'{label} for {file_info["name"]}')
+            if label == "Open 3D Viewer" and on_open_viewer is not None:
+                button.clicked.connect(on_open_viewer)
+            else:
+                connect_stub_action(button, f'{label} for {file_info["name"]}')
             actions.addWidget(button)
         actions.addStretch(1)
-        card_layout.addLayout(actions)
+        right_layout.addLayout(actions)
+        card_layout.addWidget(right, 1)
 
         layout.addWidget(card)
 
@@ -132,7 +179,7 @@ def _file_cards(parent=None):
     return wrapper
 
 
-def build_files_tab(parent=None):
+def build_files_tab(parent=None, on_open_viewer=None):
     _qtcore, qtwidgets = require_qt()
     root = qtwidgets.QWidget(parent)
     root.setObjectName("tabRoot")
@@ -159,8 +206,7 @@ def build_files_tab(parent=None):
     layout.addLayout(metrics)
 
     layout.addWidget(_build_filters(root))
-    layout.addWidget(_file_cards(root), 1)
+    layout.addWidget(_file_cards(root, on_open_viewer=on_open_viewer), 1)
 
     apply_fade_in(root)
     return root
-
