@@ -4,10 +4,11 @@ from pathlib import Path
 import re
 
 from gui.qt_compat import require_qt
-from gui.widgets import apply_fade_in, make_metric_card, make_panel
+from gui.widgets import apply_fade_in, make_panel
 
 
 _LEVEL_ORDER = {
+    "UNKNOWN": 0,
     "DEBUG": 10,
     "INFO": 20,
     "WARNING": 30,
@@ -19,6 +20,29 @@ _LEVEL_ORDER = {
 _LOG_PATTERN = re.compile(
     r"^\S+\s+\S+\s+(?P<level>[A-Z]+)\s+(?P<module>[a-zA-Z0-9_.-]+)\s*:\s*(?P<message>.*)$"
 )
+_LOG_PATTERN_ALT = re.compile(
+    r"^\S+\s+\[(?P<level>[A-Za-z]+)\]\s+(?P<module>[a-zA-Z0-9_.-]+)\s*[-:]\s*(?P<message>.*)$"
+)
+_LOG_PATTERN_SIMPLE = re.compile(
+    r"^(?P<level>[A-Za-z]+)\s+(?P<module>[a-zA-Z0-9_.-]+)\s*[:\-]\s*(?P<message>.*)$"
+)
+_LOG_PATTERN_PYTHON = re.compile(
+    r"^(?P<level>[A-Za-z]+):(?P<module>[a-zA-Z0-9_.-]+):\s*(?P<message>.*)$"
+)
+_LEVEL_FILTERS = [
+    "ALL",
+    "UNKNOWN",
+    "DEBUG",
+    "INFO",
+    "WARNING",
+    "ERROR",
+    "CRITICAL",
+    "DEBUG+",
+    "INFO+",
+    "WARNING+",
+    "ERROR+",
+    "CRITICAL+",
+]
 
 
 class LogTab:
@@ -29,6 +53,7 @@ class LogTab:
         self._log_path = Path(log_path)
         self._paused = False
         self._all_lines: list[str] = []
+        self._applied_query = ""
         self._known_modules: set[str] = set()
         self._file_pos = 0
         self._file_id: tuple[int, int] | None = None
@@ -41,18 +66,13 @@ class LogTab:
 
         title = qtwidgets.QLabel("Runtime Logs")
         title.setObjectName("title")
-        subtitle = qtwidgets.QLabel("Live tail of accloud_http.log (poll: 1s, rotation/truncate aware).")
+        subtitle = qtwidgets.QLabel("Live tail of application log (poll: 1s, rotation/truncate aware).")
         subtitle.setObjectName("subtitle")
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
         layout.addLayout(self._build_actions())
-        layout.addLayout(self._build_metrics())
         layout.addWidget(self._build_filter_bar())
-
-        self._status = qtwidgets.QLabel(f"Log file: {self._log_path}")
-        self._status.setObjectName("subtitle")
-        layout.addWidget(self._status)
 
         panel = make_panel(parent=self.root, object_name="cardAlt")
         panel_layout = qtwidgets.QVBoxLayout(panel)
@@ -91,17 +111,6 @@ class LogTab:
         row.addStretch(1)
         return row
 
-    def _build_metrics(self):
-        layout = self._qtwidgets.QHBoxLayout()
-        layout.setSpacing(10)
-        self._metric_level = make_metric_card("Current level", "INFO+", "UI filter", parent=self.root)
-        self._metric_lines = make_metric_card("HTTP lines", "0", "loaded lines", parent=self.root)
-        self._metric_errors = make_metric_card("Errors", "0", "in viewport", parent=self.root)
-        self._metric_file = make_metric_card("Log file", self._log_path.name, str(self._log_path), parent=self.root)
-        for metric in [self._metric_level, self._metric_lines, self._metric_errors, self._metric_file]:
-            layout.addWidget(metric, 1)
-        return layout
-
     def _build_filter_bar(self):
         qtwidgets = self._qtwidgets
         panel = make_panel(parent=self.root, object_name="panel")
@@ -110,19 +119,25 @@ class LogTab:
         layout.setSpacing(10)
 
         self._level_combo = qtwidgets.QComboBox()
-        self._level_combo.addItems(["DEBUG+", "INFO+", "WARNING+", "ERROR+"])
+        self._level_combo.addItems(_LEVEL_FILTERS)
+        self._level_combo.setCurrentText("ALL")
         self._level_combo.currentTextChanged.connect(self._render_view)
         layout.addWidget(self._level_combo, 1)
 
         self._module_combo = qtwidgets.QComboBox()
         self._module_combo.addItems(["All modules"])
+        self._module_combo.setCurrentText("All modules")
         self._module_combo.currentTextChanged.connect(self._render_view)
         layout.addWidget(self._module_combo, 1)
 
         self._query_edit = qtwidgets.QLineEdit()
         self._query_edit.setPlaceholderText("Filter text...")
-        self._query_edit.textChanged.connect(self._render_view)
         layout.addWidget(self._query_edit, 3)
+        self._query_edit.returnPressed.connect(self._apply_query_filter)
+
+        self._apply_query_button = qtwidgets.QPushButton("Filtrer")
+        self._apply_query_button.clicked.connect(self._apply_query_filter)
+        layout.addWidget(self._apply_query_button)
         return panel
 
     def _on_tick(self) -> None:
@@ -141,17 +156,20 @@ class LogTab:
 
     def _clear_viewport(self) -> None:
         self._log_view.setPlainText("")
-        self._set_metric_value(self._metric_lines, "0")
-        self._set_metric_value(self._metric_errors, "0")
+        self._query_edit.clear()
+        self._applied_query = ""
 
     def _toggle_pause(self) -> None:
         self._paused = not self._paused
         self._pause_button.setText("Resume stream" if self._paused else "Pause stream")
-        self._status.setText(f"Log file: {self._log_path} | {'paused' if self._paused else 'live'}")
+
+    def _apply_query_filter(self) -> None:
+        self._applied_query = self._query_edit.text().strip().lower()
+        self._render_view()
 
     def _read_incremental(self, *, force_reset: bool = False) -> None:
         if not self._log_path.exists():
-            self._status.setText(f"Log file not found: {self._log_path}")
+            self._log_view.setPlainText(f"Log file not found: {self._log_path}")
             return
 
         stat = self._log_path.stat()
@@ -195,59 +213,66 @@ class LogTab:
         self._module_combo.blockSignals(False)
 
     def _render_view(self) -> None:
-        level_threshold = _LEVEL_ORDER[self._level_combo.currentText().replace("+", "")]
+        level_filter = self._level_combo.currentText().strip().upper()
         module_filter = self._module_combo.currentText()
-        query = self._query_edit.text().strip().lower()
+        query = self._applied_query
 
         filtered: list[str] = []
-        error_count = 0
         for line in self._all_lines:
             parsed = _parse_line(line)
-            line_level = _LEVEL_ORDER.get(parsed["level"], 20)
-            if line_level < level_threshold:
+            line_level = _LEVEL_ORDER.get(parsed["level"], 0)
+            if not _level_matches_filter(line_level=line_level, filter_label=level_filter):
                 continue
             if module_filter != "All modules" and parsed["module"] != module_filter:
                 continue
             if query and query not in line.lower():
                 continue
             filtered.append(line)
-            if line_level >= 40:
-                error_count += 1
 
         if len(filtered) > 1500:
             filtered = filtered[-1500:]
         self._log_view.setPlainText("\n".join(filtered))
         self._log_view.verticalScrollBar().setValue(self._log_view.verticalScrollBar().maximum())
 
-        self._set_metric_value(self._metric_level, self._level_combo.currentText())
-        self._set_metric_value(self._metric_lines, str(len(filtered)))
-        self._set_metric_value(self._metric_errors, str(error_count))
-        self._status.setText(
-            f"Log file: {self._log_path} | lines={len(self._all_lines)} | "
-            f"{'paused' if self._paused else 'live'}"
-        )
-
-    @staticmethod
-    def _set_metric_value(metric_card, value: str) -> None:
-        _qtcore_unused, qtwidgets = require_qt()
-        for label in metric_card.findChildren(qtwidgets.QLabel):
-            if label.objectName() == "metricValue":
-                label.setText(value)
-                return
-
 
 def _parse_line(line: str) -> dict[str, str]:
     match = _LOG_PATTERN.match(line)
     if not match:
-        return {"level": "INFO", "module": "", "message": line}
+        match = _LOG_PATTERN_ALT.match(line)
+    if not match:
+        match = _LOG_PATTERN_SIMPLE.match(line)
+    if not match:
+        match = _LOG_PATTERN_PYTHON.match(line)
+    if not match:
+        return {"level": "UNKNOWN", "module": "", "message": line}
+    level = match.group("level").upper()
+    if level == "WARN":
+        level = "WARNING"
     return {
-        "level": match.group("level"),
+        "level": level,
         "module": match.group("module"),
         "message": match.group("message"),
     }
 
 
+def _level_matches_filter(*, line_level: int, filter_label: str) -> bool:
+    normalized = filter_label.strip().upper()
+    if normalized == "ALL":
+        return True
+
+    if normalized.endswith("+"):
+        base = normalized[:-1]
+        threshold = _LEVEL_ORDER.get(base)
+        if threshold is None:
+            return True
+        return line_level >= threshold
+
+    expected = _LEVEL_ORDER.get(normalized)
+    if expected is None:
+        return True
+    return line_level == expected
+
+
 def build_log_tab(parent=None, *, log_path: Path):
     tab = LogTab(parent=parent, log_path=log_path)
     return tab.root
-

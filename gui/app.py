@@ -36,28 +36,24 @@ def _configure_logging(config: AppConfig) -> None:
         handler.close()
 
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(level)
-    console_handler.setFormatter(formatter)
-    root_logger.addHandler(console_handler)
-
     config.http_log_path.parent.mkdir(parents=True, exist_ok=True)
-    http_file_handler = TimedRotatingFileHandler(
+    app_file_handler = TimedRotatingFileHandler(
         filename=str(config.http_log_path),
         when="midnight",
         interval=1,
         backupCount=config.http_log_retention_days,
         encoding="utf-8",
     )
-    http_file_handler.setLevel(logging.DEBUG)
-    http_file_handler.setFormatter(formatter)
+    app_file_handler.setLevel(logging.DEBUG)
+    app_file_handler.setFormatter(formatter)
+    root_logger.addHandler(app_file_handler)
 
     http_logger = logging.getLogger("accloud.http")
     http_logger.setLevel(logging.DEBUG)
+    # accloud.http records now flow through root handlers to keep a single consolidated log file.
     for handler in list(http_logger.handlers):
         http_logger.removeHandler(handler)
         handler.close()
-    http_logger.addHandler(http_file_handler)
     http_logger.propagate = True
 
 
@@ -71,7 +67,22 @@ def _enable_fault_handler(config: AppConfig) -> None:
 
 
 def _install_theme(app, theme: Theme) -> None:
+    from PySide6 import QtGui  # type: ignore
+
     app.setStyle("Fusion")
+    palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(theme.bg_root))
+    palette.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor(theme.text_main))
+    palette.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(theme.bg_card))
+    palette.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor(theme.bg_card_alt))
+    palette.setColor(QtGui.QPalette.ColorRole.ToolTipBase, QtGui.QColor(theme.bg_panel))
+    palette.setColor(QtGui.QPalette.ColorRole.ToolTipText, QtGui.QColor(theme.text_main))
+    palette.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor(theme.text_main))
+    palette.setColor(QtGui.QPalette.ColorRole.Button, QtGui.QColor(theme.bg_panel))
+    palette.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor(theme.text_main))
+    palette.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor(theme.accent_primary))
+    palette.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor("#ffffff"))
+    app.setPalette(palette)
     app.setStyleSheet(theme.style_sheet())
 
 
