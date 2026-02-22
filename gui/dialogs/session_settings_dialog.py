@@ -13,7 +13,7 @@ ImportHarCallback = Callable[[Path, Path], tuple[bool, str]]
 def build_session_settings_dialog(
     parent=None,
     *,
-    default_session_path: str = str(Path.home() / ".config" / "acm" / "session.json"),
+    default_session_path: str = "session.json",
     on_import_har: ImportHarCallback | None = None,
 ):
     _qtcore, qtwidgets = require_qt()
@@ -59,7 +59,7 @@ def build_session_settings_dialog(
     info_layout.setSpacing(6)
     info_layout.addWidget(qtwidgets.QLabel("Security reminders"))
     info_layout.addWidget(qtwidgets.QLabel("- Only token headers are imported from HAR."))
-    info_layout.addWidget(qtwidgets.QLabel("- Never expose Authorization, cookies, or signed URLs in logs."))
+    info_layout.addWidget(qtwidgets.QLabel("- Never expose Authorization, raw tokens, or signed URLs in logs."))
     info_layout.addWidget(qtwidgets.QLabel("- Session file permissions are expected to be 0600."))
     layout.addWidget(info_panel)
 

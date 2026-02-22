@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 
 @dataclass(slots=True)
@@ -27,7 +26,7 @@ class GcodeInfo:
     layers: int | None = None
     print_time_s: int | None = None
     resin_volume_ml: float | None = None
-    extra: dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -40,13 +39,24 @@ class Printer:
 
 @dataclass(slots=True)
 class SessionData:
-    cookies: dict[str, str] = field(default_factory=dict)
-    headers: dict[str, str] = field(default_factory=dict)
     tokens: dict[str, str] = field(default_factory=dict)
-    metadata: dict[str, Any] = field(default_factory=dict)
 
     def auth_headers(self) -> dict[str, str]:
-        merged = dict(self.headers)
-        merged.update(self.tokens)
-        return merged
+        authorization = _resolve_authorization(self.tokens)
+        if not authorization:
+            return {}
+        return {"Authorization": authorization}
 
+
+def _resolve_authorization(tokens: dict[str, str]) -> str | None:
+    explicit = str(tokens.get("Authorization", "")).strip()
+    if explicit:
+        return explicit if " " in explicit else f"Bearer {explicit}"
+
+    for key in ("access_token", "id_token", "token"):
+        candidate = str(tokens.get(key, "")).strip()
+        if not candidate:
+            continue
+        return candidate if candidate.lower().startswith("bearer ") else f"Bearer {candidate}"
+
+    return None

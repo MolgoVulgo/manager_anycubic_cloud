@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hashlib
 import json
 import logging
 import time
 from typing import Any
+from urllib.parse import urlparse
+from uuid import uuid1, uuid4
 
 import httpx
 
@@ -22,7 +25,7 @@ from accloud.utils import (
 
 
 class CloudHttpClient:
-    """HTTP transport with retry/backoff, session cookies, and safe logging."""
+    """HTTP transport with retry/backoff and safe logging."""
 
     def __init__(
         self,
@@ -37,7 +40,12 @@ class CloudHttpClient:
         self._client = httpx.Client(
             base_url=config.base_url,
             timeout=config.timeout_s,
-            headers={"User-Agent": config.user_agent},
+            headers={
+                "User-Agent": config.user_agent,
+                "X-Client-Version": config.client_version,
+                "X-Region": config.region,
+                "X-Device-Id": config.device_id,
+            },
             follow_redirects=True,
         )
         self.update_session(self._session_data)
@@ -48,9 +56,6 @@ class CloudHttpClient:
 
     def update_session(self, session_data: SessionData) -> None:
         self._session_data = session_data
-        self._client.cookies.clear()
-        for cookie_name, cookie_value in session_data.cookies.items():
-            self._client.cookies.set(cookie_name, cookie_value)
 
     def close(self) -> None:
         self._client.close()
@@ -70,15 +75,17 @@ class CloudHttpClient:
         expected_status: int | tuple[int, ...] | None = None,
         **kwargs: Any,
     ) -> httpx.Response:
-        request_headers = self._build_headers(headers=headers)
+        request_headers = self._build_headers(url=url, headers=headers)
+        request_id = request_headers.get("X-Request-Id", "")
         safe_headers = redact_mapping(request_headers)
         safe_url = safe_url_for_log(url)
         safe_json = self._safe_json_payload(kwargs.get("json"))
 
         self._logger.debug(
-            "HTTP request method=%s url=%s headers=%s json=%s",
+            "HTTP request method=%s url=%s request_id=%s headers=%s json=%s",
             method,
             safe_url,
+            request_id,
             safe_headers,
             safe_json,
         )
@@ -108,9 +115,10 @@ class CloudHttpClient:
 
             elapsed_ms = (time.perf_counter() - start_s) * 1000.0
             self._logger.info(
-                "HTTP response method=%s url=%s status=%s elapsed_ms=%.2f",
+                "HTTP response method=%s url=%s request_id=%s status=%s elapsed_ms=%.2f",
                 method,
                 safe_url,
+                request_id,
                 response.status_code,
                 elapsed_ms,
             )
@@ -118,9 +126,10 @@ class CloudHttpClient:
             if expected_status is not None and not self._status_matches(response.status_code, expected_status):
                 response_text = truncate_text(response.text, max_len=1200)
                 self._logger.error(
-                    "HTTP unexpected-status method=%s url=%s expected=%s got=%s body=%s",
+                    "HTTP unexpected-status method=%s url=%s request_id=%s expected=%s got=%s body=%s",
                     method,
                     safe_url,
+                    request_id,
                     expected_status,
                     response.status_code,
                     response_text,
@@ -174,11 +183,71 @@ class CloudHttpClient:
             status_code=response.status_code,
         )
 
-    def _build_headers(self, headers: Mapping[str, str] | None = None) -> dict[str, str]:
+    def _build_headers(self, *, url: str, headers: Mapping[str, str] | None = None) -> dict[str, str]:
         merged_headers = dict(self._session_data.auth_headers())
+        if self._is_workbench_api(url):
+            merged_headers.update(self._build_public_headers(url=url))
         if headers:
             merged_headers.update(headers)
+        merged_headers.setdefault("X-Request-Id", str(uuid4()))
         return merged_headers
+
+    def _build_public_headers(self, *, url: str) -> dict[str, str]:
+        timestamp = str(int(time.time() * 1000))
+        nonce = str(uuid1())
+        token = self._resolve_public_token()
+
+        public_headers: dict[str, str] = {
+            "XX-Device-Type": self._config.public_device_type,
+            "XX-IS-CN": self._config.public_is_cn,
+            "XX-Version": self._config.public_version,
+            "XX-Nonce": nonce,
+            "XX-Timestamp": timestamp,
+        }
+        if token:
+            public_headers["XX-Token"] = token
+
+        public_headers["XX-Signature"] = self._compute_public_signature(
+            url=url,
+            timestamp=timestamp,
+            nonce=nonce,
+            token=token,
+        )
+        return public_headers
+
+    def _compute_public_signature(self, *, url: str, timestamp: str, nonce: str, token: str) -> str:
+        # JS formula from working legacy client:
+        # md5(appid + timestamp + version + appSecret + nonce + appid)
+        _ = url  # preserved argument for call compatibility
+        _ = token
+        base = (
+            f"{self._config.public_app_id}"
+            f"{timestamp}"
+            f"{self._config.public_version}"
+            f"{self._config.public_app_secret}"
+            f"{nonce}"
+            f"{self._config.public_app_id}"
+        )
+        return hashlib.md5(base.encode("utf-8"), usedforsecurity=False).hexdigest()
+
+    def _resolve_public_token(self) -> str:
+        tokens = self._session_data.tokens
+        token = str(tokens.get("token", "")).strip()
+        return token
+
+    @staticmethod
+    def _is_workbench_api(url: str) -> bool:
+        parsed = urlparse(url)
+        if parsed.scheme and parsed.netloc:
+            return "/p/p/workbench/api/" in parsed.path
+        return "/p/p/workbench/api/" in url
+
+    @staticmethod
+    def _normalized_path(url: str) -> str:
+        parsed = urlparse(url)
+        if parsed.scheme and parsed.netloc:
+            return parsed.path or "/"
+        return str(url).split("?", 1)[0]
 
     @staticmethod
     def _status_matches(status_code: int, expected_status: int | tuple[int, ...]) -> bool:

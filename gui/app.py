@@ -93,22 +93,55 @@ def _make_session_import_callback(
     logger: logging.Logger,
 ) -> ImportHarCallback:
     def _import_har(har_path: Path, session_path: Path) -> tuple[bool, str]:
-        previous_session = client.session_data
         try:
             incoming = extract_tokens_from_har(har_path)
+            logger.debug(
+                "HAR parsed token_count=%s token_keys=%s",
+                len(incoming.tokens),
+                sorted(incoming.tokens.keys()),
+            )
             if not incoming.tokens:
                 return False, "No token found in HAR file for Anycubic endpoints."
             current = client.session_data
             merged = merge_sessions(current, incoming)
+            if not str(merged.tokens.get("token", "")).strip():
+                bootstrap_access_token = (
+                    str(merged.tokens.get("access_token", "")).strip()
+                    or str(merged.tokens.get("id_token", "")).strip()
+                )
+                if bootstrap_access_token:
+                    try:
+                        login_data = api.login_with_access_token(bootstrap_access_token)
+                        session_token = str(login_data.get("token", "")).strip()
+                        if session_token:
+                            merged.tokens["token"] = session_token
+                            logger.debug("Session token bootstrapped via loginWithAccessToken.")
+                    except Exception as exc:
+                        logger.warning("Session token bootstrap failed: %s", exc)
+            logger.debug(
+                "Writing imported session path=%s token_count=%s token_keys=%s",
+                session_path,
+                len(merged.tokens),
+                sorted(merged.tokens.keys()),
+            )
             save_session(session_path, merged)
             client.update_session(merged)
 
             valid, validation_msg = _validate_connection(api=api, logger=logger)
             if not valid:
-                # Roll back to the previous in-memory session when imported tokens are invalid.
-                client.update_session(previous_session)
-                save_session(session_path, previous_session)
-                return False, f"HAR import completed but token validation failed: {validation_msg}"
+                # Debug mode: keep imported token in-memory and on disk even if validation fails.
+                logger.warning(
+                    "Session validation failed after HAR import, keeping imported token for debug "
+                    "path=%s token_count=%s error=%s",
+                    session_path,
+                    len(merged.tokens),
+                    validation_msg,
+                )
+                return (
+                    False,
+                    "HAR import completed but token validation failed "
+                    f"(token kept for debug): {validation_msg}",
+                )
 
             logger.info("Session token import valid tokens=%s", len(merged.tokens))
             return True, f"Session imported and validated from {har_path.name}"
@@ -129,20 +162,24 @@ def _open_session_settings_dialog(owner, *, config: AppConfig, on_import_har: Im
 
 
 def _create_cloud_client(config: AppConfig, logger: logging.Logger) -> CloudHttpClient:
+    logger.debug("Session bootstrap using path=%s", config.session_path)
     if config.session_path.exists():
         try:
             session = load_session(config.session_path)
             logger.info(
-                "Loaded session cookies=%s tokens=%s from %s",
-                len(session.cookies),
+                "Loaded session tokens=%s from %s",
                 len(session.tokens),
                 config.session_path,
             )
+            logger.debug("Loaded session token keys=%s", sorted(session.tokens.keys()))
         except Exception as exc:
             logger.warning("Failed to load session file %s: %s", config.session_path, exc)
             session = SessionData()
     else:
+        logger.debug("Session file does not exist: %s", config.session_path)
         session = SessionData()
+    if not session.tokens:
+        logger.debug("No token available in active session at startup.")
     return CloudHttpClient(config=config, session_data=session)
 
 
@@ -181,8 +218,7 @@ def _validate_connection(
     logger: logging.Logger,
 ) -> tuple[bool, str]:
     try:
-        api.get_quota()
-        api.list_files(page=1, page_size=1)
+        api.validate_session()
         return True, "Connection validated."
     except Exception as exc:
         logger.warning("Connection validation failed: %s", exc)

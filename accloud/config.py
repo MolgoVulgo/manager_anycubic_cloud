@@ -25,8 +25,16 @@ class RetryConfig:
 class AppConfig:
     base_url: str = BASE_URL
     user_agent: str = "manager-anycubic-cloud/0.1.0"
+    region: str = "global"
+    device_id: str = "manager-anycubic-cloud-dev"
+    client_version: str = "0.1.0"
+    public_version: str = "1.0.0"
+    public_device_type: str = "web"
+    public_is_cn: str = "2"
+    public_app_id: str = "f9b3528877c94d5c9c5af32245db46ef"
+    public_app_secret: str = "0cf75926606049a3937f56b0373b99fb"
     timeout_s: float = 20.0
-    session_path: Path = Path.home() / ".config" / "acm" / "session.json"
+    session_path: Path = Path("session.json")
     http_log_path: Path = Path("accloud_http.log")
     http_log_retention_days: int = 14
     fault_log_path: Path = Path("accloud_fault.log")
@@ -46,6 +54,14 @@ class AppConfig:
         return cls(
             base_url=os.getenv("ACCLOUD_BASE_URL", defaults.base_url),
             user_agent=os.getenv("ACCLOUD_USER_AGENT", defaults.user_agent),
+            region=os.getenv("ACCLOUD_REGION", defaults.region),
+            device_id=os.getenv("ACCLOUD_DEVICE_ID", defaults.device_id),
+            client_version=os.getenv("ACCLOUD_CLIENT_VERSION", defaults.client_version),
+            public_version=os.getenv("ACCLOUD_PUBLIC_VERSION", defaults.public_version),
+            public_device_type=os.getenv("ACCLOUD_PUBLIC_DEVICE_TYPE", defaults.public_device_type),
+            public_is_cn=os.getenv("ACCLOUD_PUBLIC_IS_CN", defaults.public_is_cn),
+            public_app_id=os.getenv("ACCLOUD_PUBLIC_APP_ID", defaults.public_app_id),
+            public_app_secret=os.getenv("ACCLOUD_PUBLIC_APP_SECRET", defaults.public_app_secret),
             timeout_s=float(os.getenv("ACCLOUD_TIMEOUT_S", str(defaults.timeout_s))),
             session_path=Path(os.getenv("ACCLOUD_SESSION_PATH", str(defaults.session_path))),
             http_log_path=Path(os.getenv("ACCLOUD_HTTP_LOG_PATH", str(defaults.http_log_path))),
