@@ -63,6 +63,18 @@ class Theme:
             padding: 4px 6px;
         }}
 
+        QMenu,
+        QToolTip {{
+            background: {self.bg_panel};
+            color: {self.text_main};
+            border: 1px solid {self.border_soft};
+        }}
+
+        QMenu::item:selected {{
+            background: {self.accent_primary};
+            color: white;
+        }}
+
         QWidget#tabRoot {{
             background: transparent;
         }}
@@ -179,6 +191,82 @@ class Theme:
             padding: 6px 8px;
             selection-background-color: {self.accent_primary};
             selection-color: white;
+        }}
+
+        QComboBox::drop-down {{
+            border: none;
+            background: transparent;
+            width: 24px;
+        }}
+
+        QComboBox QAbstractItemView,
+        QAbstractItemView,
+        QListView,
+        QTreeView,
+        QTableView {{
+            background: {self.bg_card};
+            color: {self.text_main};
+            border: 1px solid {self.border_soft};
+            selection-background-color: {self.accent_primary};
+            selection-color: white;
+            outline: 0;
+        }}
+
+        QAbstractScrollArea,
+        QScrollArea,
+        QScrollArea > QWidget > QWidget {{
+            background: transparent;
+        }}
+
+        QAbstractScrollArea::viewport,
+        QPlainTextEdit::viewport,
+        QTextEdit::viewport {{
+            background: {self.bg_card};
+            color: {self.text_main};
+        }}
+
+        QScrollBar:vertical {{
+            background: {self.bg_panel};
+            width: 12px;
+            border: 1px solid {self.border_soft};
+            border-radius: 6px;
+            margin: 0;
+        }}
+
+        QScrollBar::handle:vertical {{
+            background: #d4c6ad;
+            min-height: 26px;
+            border-radius: 6px;
+        }}
+
+        QScrollBar::handle:vertical:hover {{
+            background: #c4b18f;
+        }}
+
+        QScrollBar:horizontal {{
+            background: {self.bg_panel};
+            height: 12px;
+            border: 1px solid {self.border_soft};
+            border-radius: 6px;
+            margin: 0;
+        }}
+
+        QScrollBar::handle:horizontal {{
+            background: #d4c6ad;
+            min-width: 26px;
+            border-radius: 6px;
+        }}
+
+        QScrollBar::handle:horizontal:hover {{
+            background: #c4b18f;
+        }}
+
+        QScrollBar::add-line,
+        QScrollBar::sub-line,
+        QScrollBar::add-page,
+        QScrollBar::sub-page {{
+            background: transparent;
+            border: none;
         }}
 
         QTabWidget::pane {{
