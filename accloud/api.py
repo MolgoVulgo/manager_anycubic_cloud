@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import Any
 
 from accloud.client import CloudHttpClient
@@ -44,13 +46,15 @@ class AnycubicCloudApi:
         payload = self._client.request_json(endpoint.method, endpoint.path, expected_status=(200, 201))
         data = _extract_data(payload)
 
-        total = _to_int(pick_first(data, "total", "total_bytes", "totalSize"), default=0)
-        used = _to_int(pick_first(data, "used", "used_bytes", "usedSize"), default=0)
-        free = _to_int(pick_first(data, "free", "free_bytes", "freeSize"), default=max(total - used, 0))
-        used_percent = _to_float(
-            pick_first(data, "used_percent", "usedPercent", default=(used / total * 100.0 if total > 0 else 0.0)),
-            default=0.0,
-        )
+        total = _to_bytes(pick_first(data, "total_bytes", "totalSize", "total"), default=0)
+        used = _to_bytes(pick_first(data, "used_bytes", "usedSize", "used"), default=0)
+        free = _to_bytes(pick_first(data, "free_bytes", "freeSize", "free"), default=max(total - used, 0))
+        if total > 0 and free == 0 and used <= total:
+            free = max(0, total - used)
+
+        used_percent = _to_percent(pick_first(data, "used_percent", "usedPercent"), default=-1.0)
+        if used_percent < 0.0:
+            used_percent = (used / total * 100.0) if total > 0 else 0.0
         return Quota(total_bytes=total, used_bytes=used, free_bytes=free, used_percent=used_percent)
 
     def list_files(self, page: int = 1, page_size: int = 20) -> list[FileItem]:
@@ -82,20 +86,54 @@ class AnycubicCloudApi:
         for raw in raw_items:
             item_map = _as_map(raw)
             file_id = str(pick_first(item_map, "id", "file_id", "fileId", default="")).strip()
-            name = str(pick_first(item_map, "name", "file_name", "fileName", default="unnamed.pwmb")).strip()
-            size_bytes = _to_int(
-                pick_first(item_map, "size", "size_bytes", "fileSize", "file_size", default=0),
+            name = str(
+                pick_first(
+                    item_map,
+                    "old_filename",
+                    "name",
+                    "filename",
+                    "file_name",
+                    "fileName",
+                    default="",
+                )
+            ).strip()
+            if not name:
+                name = _basename_from_path(_to_optional_str(pick_first(item_map, "path")) or "")
+            if not name:
+                name = "unnamed.pwmb"
+
+            size_bytes = _to_bytes(
+                pick_first(item_map, "size_bytes", "fileSize", "file_size", "size"),
                 default=0,
             )
-            status = pick_first(item_map, "status", "state")
+            raw_status = pick_first(item_map, "status", "state")
+            status_text, status_code = _normalize_file_status(raw_status)
+
+            created_at = _to_optional_timestamp_str(pick_first(item_map, "created_at", "createdAt", "createTime"))
+            updated_at = _to_optional_timestamp_str(
+                pick_first(item_map, "updated_at", "updatedAt", "updateTime", "modifyTime")
+            )
+
             files.append(
                 FileItem(
                     file_id=file_id or name,
                     name=name,
                     size_bytes=size_bytes,
-                    created_at=_to_optional_str(pick_first(item_map, "created_at", "createdAt", "createTime")),
-                    updated_at=_to_optional_str(pick_first(item_map, "updated_at", "updatedAt", "updateTime")),
-                    status=_to_optional_str(status),
+                    created_at=created_at,
+                    updated_at=updated_at,
+                    status=status_text,
+                    status_code=status_code,
+                    thumbnail_url=_to_optional_str(
+                        pick_first(item_map, "thumbnail", "thumb", "thumbnail_url", "cover", "coverUrl", "preview")
+                    ),
+                    download_url=_to_optional_str(pick_first(item_map, "url", "download_url", "downloadUrl")),
+                    gcode_id=_to_optional_str(pick_first(item_map, "gcode_id", "gcodeId")),
+                    machine_name=_to_optional_str(
+                        pick_first(item_map, "machine_name", "machineName", "device_name", "deviceName")
+                    ),
+                    region=_to_optional_str(pick_first(item_map, "region")),
+                    bucket=_to_optional_str(pick_first(item_map, "bucket")),
+                    object_path=_to_optional_str(pick_first(item_map, "path", "object_path")),
                 )
             )
         return files
@@ -330,6 +368,51 @@ def _to_float(value: Any, default: float) -> float:
         return default
 
 
+def _to_bytes(value: Any, default: int = 0) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return default
+
+    # Fast path for integer-like values.
+    try:
+        return int(float(text))
+    except ValueError:
+        pass
+
+    parsed = _parse_size_text(text)
+    if parsed is None:
+        return default
+    return parsed
+
+
+def _parse_size_text(text: str) -> int | None:
+    normalized = text.strip().lower().replace("bytes", "b")
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([kmgtp]?b)", normalized)
+    if not match:
+        return None
+
+    value = float(match.group(1))
+    unit = match.group(2)
+    factors = {
+        "b": 1,
+        "kb": 1024,
+        "mb": 1024 * 1024,
+        "gb": 1024 * 1024 * 1024,
+        "tb": 1024 * 1024 * 1024 * 1024,
+        "pb": 1024 * 1024 * 1024 * 1024 * 1024,
+    }
+    factor = factors.get(unit)
+    if factor is None:
+        return None
+    return int(value * factor)
+
+
 def _to_optional_float(value: Any) -> float | None:
     if value is None:
         return None
@@ -344,6 +427,83 @@ def _to_optional_str(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text if text else None
+
+
+def _to_optional_timestamp_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        ts = float(value)
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.isdigit():
+            ts = float(text)
+        else:
+            return text
+
+    # Handle ms epoch when needed.
+    if ts > 10_000_000_000:
+        ts = ts / 1000.0
+    if ts <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _to_percent(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace("%", "")
+    if not text:
+        return default
+    try:
+        return float(text)
+    except ValueError:
+        return default
+
+
+def _normalize_file_status(value: Any) -> tuple[str | None, int | None]:
+    if value is None:
+        return None, None
+
+    code: int | None = None
+    if isinstance(value, (int, float)) or (isinstance(value, str) and value.strip().isdigit()):
+        code = _to_optional_int(value)
+
+    if code is not None:
+        if code == 1:
+            return "ready", code
+        if code in {2, 4, 5}:
+            return "printing", code
+        if code in {0, 3}:
+            return "queued", code
+        if code < 0:
+            return "error", code
+        return f"status-{code}", code
+
+    text = str(value).strip().lower()
+    if not text:
+        return None, None
+    if text in {"ready", "done", "success", "uploaded"}:
+        return "ready", None
+    if text in {"printing", "running", "queued", "pending"}:
+        return "printing" if text in {"printing", "running"} else "queued", None
+    if text in {"error", "failed", "offline"}:
+        return "error", None
+    return text, None
+
+
+def _basename_from_path(value: str) -> str:
+    text = value.strip()
+    if not text:
+        return ""
+    return text.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
 
 
 def _to_bool(value: Any) -> bool:

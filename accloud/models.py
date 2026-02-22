@@ -19,6 +19,14 @@ class FileItem:
     created_at: str | None = None
     updated_at: str | None = None
     status: str | None = None
+    status_code: int | None = None
+    thumbnail_url: str | None = None
+    download_url: str | None = None
+    gcode_id: str | None = None
+    machine_name: str | None = None
+    region: str | None = None
+    bucket: str | None = None
+    object_path: str | None = None
 
 
 @dataclass(slots=True)
