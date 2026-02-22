@@ -9,3 +9,6 @@ __pycache__/
 *.log
 .accloud/
 session.json
+erreur.txt
+log.txt
+uc.makeronline.com.har
