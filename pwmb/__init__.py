@@ -1,7 +1,13 @@
 """PWMB parsing and decoding package."""
 
-from pwmb.container import read_pwmb_document
-from pwmb.types import LayerDef, MachineInfo, PwmbDocument
+from pwmb.container import decode_layer, read_pwmb_document
+from pwmb.types import HeaderInfo, LayerDef, MachineInfo, PwmbDocument
 
-__all__ = ["LayerDef", "MachineInfo", "PwmbDocument", "read_pwmb_document"]
-
+__all__ = [
+    "HeaderInfo",
+    "LayerDef",
+    "MachineInfo",
+    "PwmbDocument",
+    "decode_layer",
+    "read_pwmb_document",
+]

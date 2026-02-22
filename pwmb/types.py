@@ -37,10 +37,13 @@ class LayerDef:
 class PwmbDocument:
     path: Path
     version: int
+    file_size: int = 0
     header: HeaderInfo = field(default_factory=HeaderInfo)
     machine: MachineInfo = field(default_factory=MachineInfo)
     layers: list[LayerDef] = field(default_factory=list)
     table_addresses: list[int] = field(default_factory=list)
+    lut: list[int] = field(default_factory=list)
+    pws_convention: str | None = None
 
     @property
     def width(self) -> int:
@@ -53,4 +56,3 @@ class PwmbDocument:
     @property
     def pixel_count(self) -> int:
         return self.width * self.height
-
