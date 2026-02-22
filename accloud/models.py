@@ -28,6 +28,17 @@ class FileItem:
     print_time_s: int | None = None
     layer_thickness_mm: float | None = None
     machine_name: str | None = None
+    material_name: str | None = None
+    resin_usage_ml: float | None = None
+    size_x_mm: float | None = None
+    size_y_mm: float | None = None
+    size_z_mm: float | None = None
+    file_extension: str | None = None
+    bottom_layers: int | None = None
+    exposure_time_s: float | None = None
+    off_time_s: float | None = None
+    printer_names: list[str] = field(default_factory=list)
+    md5: str | None = None
     region: str | None = None
     bucket: str | None = None
     object_path: str | None = None
@@ -47,6 +58,19 @@ class Printer:
     name: str
     online: bool
     state: str | None = None
+    model: str | None = None
+    printer_type: str | None = None
+    description: str | None = None
+    reason: str | None = None
+    device_status: int | None = None
+    is_printing: int | None = None
+    last_update_time: str | None = None
+    material_type: str | None = None
+    material_used: str | None = None
+    print_total_time: str | None = None
+    image_url: str | None = None
+    machine_type: int | None = None
+    key: str | None = None
 
 
 @dataclass(slots=True)

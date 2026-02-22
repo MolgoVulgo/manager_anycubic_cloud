@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 import re
 from typing import Any
@@ -85,6 +86,7 @@ class AnycubicCloudApi:
         files: list[FileItem] = []
         for raw in raw_items:
             item_map = _as_map(raw)
+            slice_param = _as_map(pick_first(item_map, "slice_param"))
             file_id = str(pick_first(item_map, "id", "file_id", "fileId", default="")).strip()
             name = str(
                 pick_first(
@@ -111,10 +113,10 @@ class AnycubicCloudApi:
 
             created_at = _to_optional_timestamp_str(pick_first(item_map, "created_at", "createdAt", "createTime"))
             updated_at = _to_optional_timestamp_str(
-                pick_first(item_map, "updated_at", "updatedAt", "updateTime", "modifyTime")
+                pick_first(item_map, "updated_at", "updatedAt", "updateTime", "modifyTime", "update_time")
             )
             upload_time = _to_optional_timestamp_str(
-                pick_first(item_map, "upload_time", "uploadTime", "createTime", "createdAt", "created_at")
+                pick_first(item_map, "upload_time", "uploadTime", "createTime", "createdAt", "created_at", "time")
             ) or created_at
 
             files.append(
@@ -132,16 +134,78 @@ class AnycubicCloudApi:
                     ),
                     download_url=_to_optional_str(pick_first(item_map, "url", "download_url", "downloadUrl")),
                     gcode_id=_to_optional_str(pick_first(item_map, "gcode_id", "gcodeId")),
-                    layer_count=_to_optional_int(pick_first(item_map, "layers", "layer_count", "layerCount")),
+                    layer_count=_to_optional_int(
+                        pick_first(
+                            item_map,
+                            "layers",
+                            "layer_count",
+                            "layerCount",
+                            default=pick_first(slice_param, "layers"),
+                        )
+                    ),
                     print_time_s=_to_optional_int(
-                        pick_first(item_map, "print_time_s", "printTime", "print_time", "estimate")
+                        pick_first(
+                            item_map,
+                            "print_time_s",
+                            "printTime",
+                            "print_time",
+                            "estimate",
+                            default=pick_first(slice_param, "estimate"),
+                        )
                     ),
                     layer_thickness_mm=_to_optional_float(
-                        pick_first(item_map, "layer_height", "layerHeight", "thickness")
+                        pick_first(
+                            item_map,
+                            "layer_height",
+                            "layerHeight",
+                            "thickness",
+                            default=pick_first(slice_param, "zthick"),
+                        )
                     ),
                     machine_name=_to_optional_str(
-                        pick_first(item_map, "machine_name", "machineName", "device_name", "deviceName")
+                        pick_first(
+                            item_map,
+                            "machine_name",
+                            "machineName",
+                            "device_name",
+                            "deviceName",
+                            default=pick_first(slice_param, "machine_name"),
+                        )
                     ),
+                    material_name=_to_optional_str(
+                        pick_first(item_map, "material_name", default=pick_first(slice_param, "material_name"))
+                    ),
+                    resin_usage_ml=_to_optional_float(
+                        pick_first(
+                            item_map,
+                            "supplies_usage",
+                            "material",
+                            default=pick_first(slice_param, "supplies_usage"),
+                        )
+                    ),
+                    size_x_mm=_to_optional_float(pick_first(item_map, "size_x", default=pick_first(slice_param, "size_x"))),
+                    size_y_mm=_to_optional_float(pick_first(item_map, "size_y", default=pick_first(slice_param, "size_y"))),
+                    size_z_mm=_to_optional_float(pick_first(item_map, "size_z", default=pick_first(slice_param, "size_z"))),
+                    file_extension=_to_optional_str(
+                        pick_first(item_map, "file_extension", default=name.rsplit(".", 1)[-1] if "." in name else None)
+                    ),
+                    bottom_layers=_to_optional_int(
+                        pick_first(item_map, "bottom_layers", "bott_layers", default=pick_first(slice_param, "bott_layers"))
+                    ),
+                    exposure_time_s=_to_optional_float(
+                        pick_first(item_map, "exposure_time", default=pick_first(slice_param, "exposure_time"))
+                    ),
+                    off_time_s=_to_optional_float(
+                        pick_first(item_map, "off_time", default=pick_first(slice_param, "off_time"))
+                    ),
+                    printer_names=_to_str_list(
+                        pick_first(
+                            item_map,
+                            "printer_names",
+                            default=pick_first(slice_param, "machine_name"),
+                        )
+                    ),
+                    md5=_to_optional_str(pick_first(item_map, "md5", "origin_file_md5")),
                     region=_to_optional_str(pick_first(item_map, "region")),
                     bucket=_to_optional_str(pick_first(item_map, "bucket")),
                     object_path=_to_optional_str(pick_first(item_map, "path", "object_path")),
@@ -305,14 +369,44 @@ class AnycubicCloudApi:
             item_map = _as_map(raw)
             printer_id = str(pick_first(item_map, "id", "printer_id", "printerId", default="")).strip()
             name = str(pick_first(item_map, "name", "printer_name", "printerName", default=printer_id)).strip()
-            online_raw = pick_first(item_map, "online", "isOnline", "connected", default=False)
-            state = _to_optional_str(pick_first(item_map, "state", "status"))
+            available = _to_optional_int(pick_first(item_map, "available"))
+            device_status = _to_optional_int(pick_first(item_map, "device_status"))
+            status_code = _to_optional_int(pick_first(item_map, "status"))
+            is_printing = _to_optional_int(pick_first(item_map, "is_printing"))
+            reason = _to_optional_str(pick_first(item_map, "reason", "msg"))
+            online = _resolve_printer_online(
+                available=available,
+                device_status=device_status,
+                status_code=status_code,
+                fallback=pick_first(item_map, "online", "isOnline", "connected", default=False),
+            )
+            state = _resolve_printer_state(
+                online=online,
+                is_printing=is_printing,
+                raw_state=_to_optional_str(pick_first(item_map, "state")),
+                reason=reason,
+            )
             printers.append(
                 Printer(
                     printer_id=printer_id or name,
                     name=name,
-                    online=_to_bool(online_raw),
+                    online=online,
                     state=state,
+                    model=_to_optional_str(pick_first(item_map, "model")),
+                    printer_type=_to_optional_str(pick_first(item_map, "type", "printer_type")),
+                    description=_to_optional_str(pick_first(item_map, "description")),
+                    reason=reason,
+                    device_status=device_status,
+                    is_printing=is_printing,
+                    last_update_time=_to_optional_timestamp_str(
+                        pick_first(item_map, "last_update_time", "lastUpdateTime", "create_time")
+                    ),
+                    material_type=_to_optional_str(pick_first(item_map, "material_type")),
+                    material_used=_to_optional_str(pick_first(item_map, "material_used")),
+                    print_total_time=_to_optional_str(pick_first(item_map, "print_totaltime", "print_total_time")),
+                    image_url=_to_optional_str(pick_first(item_map, "img", "image")),
+                    machine_type=_to_optional_int(pick_first(item_map, "machine_type")),
+                    key=_to_optional_str(pick_first(item_map, "key")),
                 )
             )
         return printers
@@ -353,7 +447,30 @@ def _extract_list(data: Mapping[str, Any]) -> list[Any]:
 def _as_map(value: Any) -> Mapping[str, Any]:
     if isinstance(value, dict):
         return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("{") and text.endswith("}"):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                return {}
+            if isinstance(parsed, dict):
+                return parsed
     return {}
+
+
+def _to_str_list(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        output: list[str] = []
+        for item in value:
+            text = _to_optional_str(item)
+            if text:
+                output.append(text)
+        return output
+    text = _to_optional_str(value)
+    if text:
+        return [text]
+    return []
 
 
 def _to_int(value: Any, default: int) -> int:
@@ -508,6 +625,32 @@ def _normalize_file_status(value: Any) -> tuple[str | None, int | None]:
     if text in {"error", "failed", "offline"}:
         return "error", None
     return text, None
+
+
+def _resolve_printer_online(*, available: int | None, device_status: int | None, status_code: int | None, fallback: Any) -> bool:
+    if available is not None:
+        return available == 1
+    if device_status is not None:
+        return device_status == 1
+    if status_code is not None:
+        return status_code == 1
+    return _to_bool(fallback)
+
+
+def _resolve_printer_state(
+    *,
+    online: bool,
+    is_printing: int | None,
+    raw_state: str | None,
+    reason: str | None,
+) -> str:
+    if raw_state:
+        return raw_state
+    if not online:
+        return reason or "offline"
+    if is_printing is not None and is_printing > 0:
+        return "printing"
+    return "online"
 
 
 def _basename_from_path(value: str) -> str:

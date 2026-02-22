@@ -71,6 +71,28 @@ def test_list_files_maps_catalog_fields_and_status(tmp_path: Path) -> None:
                             "layers": 287,
                             "estimate": 3114,
                             "layer_height": 0.05,
+                            "material_name": "Resin",
+                            "supplies_usage": 68.18040466308594,
+                            "size_x": 0,
+                            "size_y": 0,
+                            "size_z": 23.5,
+                            "file_extension": "pwmb",
+                            "printer_names": ["Anycubic Photon M3 Plus"],
+                            "md5": "1d3aff6dfda0ffd0438eceda7eb817a0",
+                            "slice_param": {
+                                "layers": 470,
+                                "estimate": 4698,
+                                "zthick": 0.05000000074505806,
+                                "machine_name": "Anycubic Photon M3 Plus",
+                                "material_name": "Basic",
+                                "supplies_usage": 68.18040466308594,
+                                "bott_layers": 6,
+                                "exposure_time": 1.5,
+                                "off_time": 0.5,
+                                "size_x": 0,
+                                "size_y": 0,
+                                "size_z": 23.5,
+                            },
                             "url": "https://cdn.example.com/file.pwmb",
                             "thumbnail": "https://cdn.example.com/thumb.jpg",
                             "region": "us-east-2",
@@ -102,6 +124,17 @@ def test_list_files_maps_catalog_fields_and_status(tmp_path: Path) -> None:
     assert item.layer_count == 287
     assert item.print_time_s == 3114
     assert item.layer_thickness_mm == 0.05
+    assert item.material_name == "Resin"
+    assert item.resin_usage_ml == 68.18040466308594
+    assert item.size_x_mm == 0.0
+    assert item.size_y_mm == 0.0
+    assert item.size_z_mm == 23.5
+    assert item.file_extension == "pwmb"
+    assert item.bottom_layers == 6
+    assert item.exposure_time_s == 1.5
+    assert item.off_time_s == 0.5
+    assert item.printer_names == ["Anycubic Photon M3 Plus"]
+    assert item.md5 == "1d3aff6dfda0ffd0438eceda7eb817a0"
     assert item.upload_time is not None and item.upload_time.endswith("UTC")
     assert item.thumbnail_url == "https://cdn.example.com/thumb.jpg"
     assert item.download_url == "https://cdn.example.com/file.pwmb"
@@ -109,3 +142,66 @@ def test_list_files_maps_catalog_fields_and_status(tmp_path: Path) -> None:
     assert item.bucket == "workbentch"
     assert item.object_path == "file/30553490/model.pwmb"
     assert item.updated_at is not None and item.updated_at.endswith("UTC")
+
+
+def test_list_printers_maps_cloud_fields_and_online_state(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/p/p/workbench/api/work/printer/getPrinters":
+            return httpx.Response(
+                200,
+                json={
+                    "code": 1,
+                    "data": [
+                        {
+                            "id": 42859,
+                            "name": "Anycubic Photon M3 Plus",
+                            "model": "Anycubic Photon M3 Plus",
+                            "type": "LCD",
+                            "description": "A7F6-B0FF-F706-3D49",
+                            "device_status": 1,
+                            "is_printing": 1,
+                            "reason": "busy",
+                            "last_update_time": 1770662731054,
+                            "material_type": "Resin",
+                            "material_used": "23127.1ml",
+                            "print_totaltime": "642h53m",
+                            "machine_type": 107,
+                            "key": "device-key",
+                            "img": "https://cdn.example.com/printer.png",
+                            "status": 1,
+                        },
+                        {
+                            "id": 42860,
+                            "name": "Anycubic Photon Mono 4",
+                            "model": "Anycubic Photon Mono 4",
+                            "type": "LCD",
+                            "device_status": 2,
+                            "is_printing": 0,
+                            "reason": "offline",
+                            "status": 1,
+                        },
+                    ],
+                },
+            )
+        return httpx.Response(404, json={"error": "not found"})
+
+    client = _build_client(handler=handler, tmp_path=tmp_path)
+    api = AnycubicCloudApi(client)
+    try:
+        printers = api.list_printers()
+    finally:
+        client.close()
+
+    assert len(printers) == 2
+    printer_online = printers[0]
+    assert printer_online.printer_id == "42859"
+    assert printer_online.online is True
+    assert printer_online.state == "printing"
+    assert printer_online.printer_type == "LCD"
+    assert printer_online.material_used == "23127.1ml"
+    assert printer_online.last_update_time is not None and printer_online.last_update_time.endswith("UTC")
+
+    printer_offline = printers[1]
+    assert printer_offline.printer_id == "42860"
+    assert printer_offline.online is False
+    assert printer_offline.state == "offline"

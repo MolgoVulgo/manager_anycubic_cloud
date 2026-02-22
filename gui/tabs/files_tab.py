@@ -281,13 +281,39 @@ class FilesTab:
         details_label.setWordWrap(True)
         right_layout.addWidget(details_label)
 
-        meta = qtwidgets.QLabel(f"Size: {format_bytes(file_item.size_bytes)} | Id: {file_item.file_id}")
+        extra_info: list[str] = []
+        if file_item.material_name:
+            extra_info.append(f"Material: {file_item.material_name}")
+        if file_item.machine_name:
+            extra_info.append(f"Machine: {file_item.machine_name}")
+        resin_text = _format_resin_usage(file_item.resin_usage_ml)
+        if resin_text != "-":
+            extra_info.append(f"Resin: {resin_text}")
+        dims_text = _format_dimensions(file_item)
+        if dims_text != "-":
+            extra_info.append(f"Size XYZ: {dims_text}")
+        if extra_info:
+            extra_label = qtwidgets.QLabel(" | ".join(extra_info))
+            extra_label.setObjectName("subtitle")
+            extra_label.setWordWrap(True)
+            right_layout.addWidget(extra_label)
+
+        meta = qtwidgets.QLabel(
+            f"Size: {format_bytes(file_item.size_bytes)} | Id: {file_item.file_id} | "
+            f"Status: {file_item.status or '-'}"
+        )
         meta.setObjectName("subtitle")
         meta.setWordWrap(True)
         right_layout.addWidget(meta)
 
         actions = qtwidgets.QHBoxLayout()
-        for label in ["Details", "Print", "Download"]:
+        details_button = qtwidgets.QPushButton("Details")
+        details_button.clicked.connect(
+            lambda _checked=False, item=file_item: self._show_file_details(item)
+        )
+        actions.addWidget(details_button)
+
+        for label in ["Print", "Download"]:
             button = qtwidgets.QPushButton(label)
             connect_stub_action(button, f"{label} for {file_item.name}")
             actions.addWidget(button)
@@ -312,6 +338,71 @@ class FilesTab:
             self._on_open_viewer(file_item)
         except TypeError:
             self._on_open_viewer()
+
+    def _show_file_details(self, file_item: FileItem) -> None:
+        _qtcore, qtwidgets = require_qt()
+        printers = ", ".join(file_item.printer_names) if file_item.printer_names else "-"
+        lines = [
+            "[General]",
+            f"Name: {file_item.name}",
+            f"File ID: {file_item.file_id}",
+            f"Extension: {file_item.file_extension or '-'}",
+            f"Size: {format_bytes(file_item.size_bytes)} ({file_item.size_bytes} bytes)",
+            f"Gcode ID: {file_item.gcode_id or '-'}",
+            f"Status: {file_item.status or '-'}",
+            f"Status code: {file_item.status_code if file_item.status_code is not None else '-'}",
+            "",
+            "[Slicing]",
+            f"Print time: {_format_print_time(file_item.print_time_s)}",
+            f"Layers: {file_item.layer_count if file_item.layer_count is not None else '-'}",
+            f"Layer thickness: {_format_thickness(file_item.layer_thickness_mm)}",
+            f"Machine: {file_item.machine_name or '-'}",
+            f"Material: {file_item.material_name or '-'}",
+            f"Resin usage: {_format_resin_usage(file_item.resin_usage_ml)}",
+            f"Dimensions (X/Y/Z): {_format_dimensions(file_item)}",
+            f"Bottom layers: {file_item.bottom_layers if file_item.bottom_layers is not None else '-'}",
+            f"Exposure time: {_format_seconds(file_item.exposure_time_s)}",
+            f"Off time: {_format_seconds(file_item.off_time_s)}",
+            f"Printers: {printers}",
+            f"MD5: {file_item.md5 or '-'}",
+            "",
+            "[Cloud]",
+            f"Upload time: {file_item.upload_time or '-'}",
+            f"Created at: {file_item.created_at or '-'}",
+            f"Updated at: {file_item.updated_at or '-'}",
+            f"Thumbnail URL: {file_item.thumbnail_url or '-'}",
+            f"Download URL: {file_item.download_url or '-'}",
+            f"Region: {file_item.region or '-'}",
+            f"Bucket: {file_item.bucket or '-'}",
+            f"Path: {file_item.object_path or '-'}",
+        ]
+
+        dialog = qtwidgets.QDialog(self.root)
+        dialog.setWindowTitle("File Details")
+        dialog.resize(760, 460)
+        dialog.setMinimumSize(620, 360)
+
+        layout = qtwidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        title = qtwidgets.QLabel(file_item.name)
+        title.setObjectName("title")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        body = qtwidgets.QPlainTextEdit(dialog)
+        body.setReadOnly(True)
+        body.setObjectName("monoBlock")
+        body.setPlainText("\n".join(lines))
+        layout.addWidget(body, 1)
+
+        buttons = qtwidgets.QDialogButtonBox(qtwidgets.QDialogButtonBox.StandardButton.Close, dialog)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+
+        dialog.exec()
 
     def _build_thumbnail(self, file_item: FileItem, parent):
         qtcore, qtwidgets = require_qt()
@@ -453,6 +544,33 @@ def _format_thickness(value: float | None) -> str:
     if value is None or value <= 0:
         return "-"
     return f"{value:.3f} mm"
+
+
+def _format_resin_usage(value: float | None) -> str:
+    if value is None or value <= 0:
+        return "-"
+    return f"{value:.2f} ml"
+
+
+def _format_seconds(value: float | None) -> str:
+    if value is None or value < 0:
+        return "-"
+    return f"{value:.3g} s"
+
+
+def _format_dimensions(file_item: FileItem) -> str:
+    x = file_item.size_x_mm
+    y = file_item.size_y_mm
+    z = file_item.size_z_mm
+    if x is None and y is None and z is None:
+        return "-"
+    return f"{_fmt_dim(x)} / {_fmt_dim(y)} / {_fmt_dim(z)} mm"
+
+
+def _fmt_dim(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.3g}"
 
 
 def build_files_tab(

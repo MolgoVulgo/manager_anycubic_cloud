@@ -13,7 +13,7 @@ from accloud.api import AnycubicCloudApi
 from accloud.cache_store import CacheStore
 from accloud.client import CloudHttpClient
 from accloud.config import AppConfig
-from accloud.models import FileItem, Quota, SessionData
+from accloud.models import FileItem, Printer, Quota, SessionData
 from accloud.session_store import extract_tokens_from_har, load_session, merge_sessions, save_session
 from gui.dialogs.print_dialog import build_print_dialog
 from gui.dialogs.pwmb3d_dialog import build_pwmb3d_dialog
@@ -254,6 +254,31 @@ def _make_refresh_files_callback(
     return _refresh
 
 
+def _make_refresh_printers_callback(
+    *,
+    api: AnycubicCloudApi,
+    logger: logging.Logger,
+    config: AppConfig,
+    cache_store: CacheStore,
+):
+    def _refresh() -> tuple[list[Printer], str | None]:
+        try:
+            printers = api.list_printers()
+        except Exception as exc:
+            logger.warning("Printers refresh failed: %s", exc)
+            cached_printers = _load_printer_snapshot(cache_store=cache_store, config=config)
+            if cached_printers:
+                return cached_printers, "Cloud unavailable, loaded printers from local cache."
+            return [], f"Printers refresh failed: {exc}"
+
+        _save_printer_snapshot(cache_store=cache_store, printers=printers)
+        if printers:
+            return printers, None
+        return printers, "No printer returned by cloud API."
+
+    return _refresh
+
+
 def _extract_layer_thickness_mm(extra: dict[str, object]) -> float | None:
     if not extra:
         return None
@@ -375,6 +400,11 @@ def _save_startup_snapshot(*, cache_store: CacheStore, quota: Quota | None, file
     cache_store.save_json("startup_snapshot", payload)
 
 
+def _save_printer_snapshot(*, cache_store: CacheStore, printers: list[Printer]) -> None:
+    payload = [asdict(item) for item in printers]
+    cache_store.save_json("printers_snapshot", payload)
+
+
 def _load_startup_snapshot(*, cache_store: CacheStore, config: AppConfig) -> tuple[Quota | None, list[FileItem]]:
     payload = cache_store.load_json("startup_snapshot", max_age_s=config.cache_startup_ttl_s)
     if not isinstance(payload, dict):
@@ -383,6 +413,11 @@ def _load_startup_snapshot(*, cache_store: CacheStore, config: AppConfig) -> tup
     quota = _deserialize_quota(payload.get("quota"))
     files = _deserialize_files(payload.get("files"))
     return quota, files
+
+
+def _load_printer_snapshot(*, cache_store: CacheStore, config: AppConfig) -> list[Printer]:
+    payload = cache_store.load_json("printers_snapshot", max_age_s=config.cache_startup_ttl_s)
+    return _deserialize_printers(payload)
 
 
 def _deserialize_quota(raw: object) -> Quota | None:
@@ -419,9 +454,51 @@ def _deserialize_files(raw: object) -> list[FileItem]:
                 print_time_s=_to_optional_int(item.get("print_time_s")),
                 layer_thickness_mm=_to_optional_float(item.get("layer_thickness_mm")),
                 machine_name=_to_optional_str(item.get("machine_name")),
+                material_name=_to_optional_str(item.get("material_name")),
+                resin_usage_ml=_to_optional_float(item.get("resin_usage_ml")),
+                size_x_mm=_to_optional_float(item.get("size_x_mm")),
+                size_y_mm=_to_optional_float(item.get("size_y_mm")),
+                size_z_mm=_to_optional_float(item.get("size_z_mm")),
+                file_extension=_to_optional_str(item.get("file_extension")),
+                bottom_layers=_to_optional_int(item.get("bottom_layers")),
+                exposure_time_s=_to_optional_float(item.get("exposure_time_s")),
+                off_time_s=_to_optional_float(item.get("off_time_s")),
+                printer_names=_to_str_list(item.get("printer_names")),
+                md5=_to_optional_str(item.get("md5")),
                 region=_to_optional_str(item.get("region")),
                 bucket=_to_optional_str(item.get("bucket")),
                 object_path=_to_optional_str(item.get("object_path")),
+            )
+        )
+    return output
+
+
+def _deserialize_printers(raw: object) -> list[Printer]:
+    if not isinstance(raw, list):
+        return []
+    output: list[Printer] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        output.append(
+            Printer(
+                printer_id=str(item.get("printer_id", "")),
+                name=str(item.get("name", "Unknown printer")),
+                online=_to_bool(item.get("online")),
+                state=_to_optional_str(item.get("state")),
+                model=_to_optional_str(item.get("model")),
+                printer_type=_to_optional_str(item.get("printer_type")),
+                description=_to_optional_str(item.get("description")),
+                reason=_to_optional_str(item.get("reason")),
+                device_status=_to_optional_int(item.get("device_status")),
+                is_printing=_to_optional_int(item.get("is_printing")),
+                last_update_time=_to_optional_str(item.get("last_update_time")),
+                material_type=_to_optional_str(item.get("material_type")),
+                material_used=_to_optional_str(item.get("material_used")),
+                print_total_time=_to_optional_str(item.get("print_total_time")),
+                image_url=_to_optional_str(item.get("image_url")),
+                machine_type=_to_optional_int(item.get("machine_type")),
+                key=_to_optional_str(item.get("key")),
             )
         )
     return output
@@ -466,6 +543,30 @@ def _to_optional_str(value: object) -> str | None:
     return text if text else None
 
 
+def _to_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "online"}
+    return False
+
+
+def _to_str_list(value: object) -> list[str]:
+    if isinstance(value, (list, tuple)):
+        output: list[str] = []
+        for item in value:
+            text = _to_optional_str(item)
+            if text:
+                output.append(text)
+        return output
+    text = _to_optional_str(value)
+    if text:
+        return [text]
+    return []
+
+
 def _validate_connection(
     *,
     api: AnycubicCloudApi,
@@ -491,6 +592,7 @@ def _bootstrap_startup(
     cache_store: CacheStore,
 ) -> None:
     files_tab = getattr(window, "_files_tab_controller", None)
+    printer_tab = getattr(window, "_printer_tab_controller", None)
 
     if files_tab is not None:
         cached_quota, cached_files = _load_startup_snapshot(cache_store=cache_store, config=config)
@@ -500,6 +602,13 @@ def _bootstrap_startup(
                 files=cached_files,
                 error_message="Loaded from local cache while syncing cloud data.",
             )
+    if printer_tab is not None and hasattr(printer_tab, "render_printers"):
+        cached_printers = _load_printer_snapshot(cache_store=cache_store, config=config)
+        if cached_printers:
+            try:
+                printer_tab.render_printers(cached_printers)
+            except Exception as exc:  # pragma: no cover - UI safety path
+                logger.debug("Could not apply cached printers on startup: %s", exc)
 
     _start_refresh_job(
         window=window,
@@ -526,6 +635,7 @@ def _start_refresh_job(
 ) -> None:
     qtcore, _qtwidgets = require_qt()
     files_tab = getattr(window, "_files_tab_controller", None)
+    printer_tab = getattr(window, "_printer_tab_controller", None)
 
     if files_tab is not None:
         files_tab.set_loading(True, "Loading cloud data...")
@@ -591,6 +701,11 @@ def _start_refresh_job(
                 files=files if isinstance(files, list) else [],
                 error_message=error_message if isinstance(error_message, str) else None,
             )
+        if printer_tab is not None and hasattr(printer_tab, "refresh"):
+            try:
+                printer_tab.refresh()
+            except Exception as exc:  # pragma: no cover - UI safety path
+                logger.debug("Printer startup refresh skipped: %s", exc)
 
     timer.timeout.connect(_poll)
     timer.start()
@@ -609,6 +724,12 @@ def build_main_window(
     logger = logging.getLogger("gui.app")
     session_import_cb = _make_session_import_callback(client=client, api=api, logger=logger)
     refresh_cb = _make_refresh_files_callback(
+        api=api,
+        logger=logger,
+        config=config,
+        cache_store=cache_store,
+    )
+    refresh_printers_cb = _make_refresh_printers_callback(
         api=api,
         logger=logger,
         config=config,
@@ -681,13 +802,21 @@ def build_main_window(
         files_widget,
         "Files",
     )
-    tabs.addTab(build_printer_tab(window), "Printer")
+    printer_widget = build_printer_tab(
+        window,
+        on_open_print_dialog=lambda _printer=None: _open_print_dialog(window),
+        on_refresh=refresh_printers_cb,
+        auto_refresh=False,
+    )
+    tabs.addTab(printer_widget, "Printer")
     tabs.addTab(build_log_tab(window, log_path=config.http_log_path), "Log")
     root_layout.addWidget(tabs, 1)
 
     window._files_tab_controller = getattr(files_widget, "_files_tab_controller", None)  # type: ignore[attr-defined]
+    window._printer_tab_controller = getattr(printer_widget, "_printer_tab_controller", None)  # type: ignore[attr-defined]
     window._session_import_cb = session_import_cb  # type: ignore[attr-defined]
     window._refresh_files_cb = refresh_cb  # type: ignore[attr-defined]
+    window._refresh_printers_cb = refresh_printers_cb  # type: ignore[attr-defined]
     return window
 
 
