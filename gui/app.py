@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict
 import faulthandler
 import logging
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 import sys
+import threading
 
 from accloud.api import AnycubicCloudApi
+from accloud.cache_store import CacheStore
 from accloud.client import CloudHttpClient
 from accloud.config import AppConfig
 from accloud.models import FileItem, Quota, SessionData
@@ -187,6 +191,8 @@ def _make_refresh_files_callback(
     *,
     api: AnycubicCloudApi,
     logger: logging.Logger,
+    config: AppConfig,
+    cache_store: CacheStore,
 ):
     def _refresh() -> tuple[Quota | None, list[FileItem], str | None]:
         errors: list[str] = []
@@ -205,11 +211,248 @@ def _make_refresh_files_callback(
             logger.warning("Files refresh failed: %s", exc)
             errors.append(f"files: {exc}")
 
+        _enrich_files_with_gcode(
+            files=files,
+            api=api,
+            logger=logger,
+            config=config,
+            cache_store=cache_store,
+        )
+
+        if quota is not None or files:
+            _save_startup_snapshot(cache_store=cache_store, quota=quota, files=files)
+
+        if errors and quota is None and not files:
+            cached_quota, cached_files = _load_startup_snapshot(cache_store=cache_store, config=config)
+            if cached_quota is not None or cached_files:
+                return (
+                    cached_quota,
+                    cached_files,
+                    "Cloud unavailable, loaded from local cache.",
+                )
+
         if errors:
+            cached_quota, cached_files = _load_startup_snapshot(cache_store=cache_store, config=config)
+            if quota is None and cached_quota is not None:
+                quota = cached_quota
+            if not files and cached_files:
+                files = cached_files
             return quota, files, "Refresh partial failure: " + " | ".join(errors)
         return quota, files, None
 
     return _refresh
+
+
+def _extract_layer_thickness_mm(extra: dict[str, object]) -> float | None:
+    if not extra:
+        return None
+    for key in ("layer_height", "layerHeight", "thickness", "layer_thickness", "layerThickness"):
+        value = extra.get(key)
+        if value is None:
+            continue
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed <= 0:
+            continue
+        return parsed
+    return None
+
+
+def _enrich_files_with_gcode(
+    *,
+    files: list[FileItem],
+    api: AnycubicCloudApi,
+    logger: logging.Logger,
+    config: AppConfig,
+    cache_store: CacheStore,
+) -> None:
+    missing: list[tuple[FileItem, str]] = []
+
+    for file_item in files:
+        needs_layers = file_item.layer_count is None
+        needs_print_time = file_item.print_time_s is None
+        needs_thickness = file_item.layer_thickness_mm is None
+        if not (needs_layers or needs_print_time or needs_thickness):
+            continue
+
+        lookup_id = file_item.gcode_id or file_item.file_id
+        if not lookup_id:
+            continue
+
+        cached = cache_store.load_json(f"gcode/{lookup_id}", max_age_s=config.cache_gcode_ttl_s)
+        if isinstance(cached, dict):
+            _apply_cached_gcode(file_item=file_item, payload=cached)
+            needs_layers = file_item.layer_count is None
+            needs_print_time = file_item.print_time_s is None
+            needs_thickness = file_item.layer_thickness_mm is None
+            if not (needs_layers or needs_print_time or needs_thickness):
+                continue
+
+        missing.append((file_item, lookup_id))
+
+    if not missing:
+        return
+
+    # Log analysis shows this endpoint dominated startup latency. Limit and parallelize calls.
+    candidates = missing
+    workers = max(1, min(4, len(candidates)))
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="gcode-info") as pool:
+        futures = {
+            pool.submit(api.get_gcode_info, lookup_id): (file_item, lookup_id)
+            for file_item, lookup_id in candidates
+        }
+        for future in as_completed(futures):
+            file_item, lookup_id = futures[future]
+            try:
+                gcode = future.result()
+            except Exception as exc:
+                logger.debug(
+                    "GCode metadata fetch failed file_id=%s gcode_id=%s error=%s",
+                    file_item.file_id,
+                    lookup_id,
+                    exc,
+                )
+                continue
+
+            _apply_gcode(file_item=file_item, gcode=gcode)
+            cache_store.save_json(
+                f"gcode/{lookup_id}",
+                {
+                    "layers": gcode.layers,
+                    "print_time_s": gcode.print_time_s,
+                    "layer_thickness_mm": _extract_layer_thickness_mm(gcode.extra),
+                },
+            )
+
+
+def _apply_gcode(file_item: FileItem, gcode) -> None:
+    if file_item.layer_count is None and gcode.layers is not None:
+        file_item.layer_count = gcode.layers
+    if file_item.print_time_s is None and gcode.print_time_s is not None:
+        file_item.print_time_s = gcode.print_time_s
+    if file_item.layer_thickness_mm is None:
+        thickness = _extract_layer_thickness_mm(gcode.extra)
+        if thickness is not None:
+            file_item.layer_thickness_mm = thickness
+
+
+def _apply_cached_gcode(file_item: FileItem, payload: dict[str, object]) -> None:
+    if file_item.layer_count is None:
+        layers = _to_optional_int(payload.get("layers"))
+        if layers is not None:
+            file_item.layer_count = layers
+
+    if file_item.print_time_s is None:
+        print_time = _to_optional_int(payload.get("print_time_s"))
+        if print_time is not None:
+            file_item.print_time_s = print_time
+
+    if file_item.layer_thickness_mm is None:
+        thickness = _to_optional_float(payload.get("layer_thickness_mm"))
+        if thickness is not None and thickness > 0:
+            file_item.layer_thickness_mm = thickness
+
+
+def _save_startup_snapshot(*, cache_store: CacheStore, quota: Quota | None, files: list[FileItem]) -> None:
+    payload: dict[str, object] = {
+        "quota": asdict(quota) if quota is not None else None,
+        "files": [asdict(item) for item in files],
+    }
+    cache_store.save_json("startup_snapshot", payload)
+
+
+def _load_startup_snapshot(*, cache_store: CacheStore, config: AppConfig) -> tuple[Quota | None, list[FileItem]]:
+    payload = cache_store.load_json("startup_snapshot", max_age_s=config.cache_startup_ttl_s)
+    if not isinstance(payload, dict):
+        return None, []
+
+    quota = _deserialize_quota(payload.get("quota"))
+    files = _deserialize_files(payload.get("files"))
+    return quota, files
+
+
+def _deserialize_quota(raw: object) -> Quota | None:
+    if not isinstance(raw, dict):
+        return None
+    total = _to_int(raw.get("total_bytes"), default=0)
+    used = _to_int(raw.get("used_bytes"), default=0)
+    free = _to_int(raw.get("free_bytes"), default=max(total - used, 0))
+    percent = _to_float(raw.get("used_percent"), default=(used / total * 100.0 if total > 0 else 0.0))
+    return Quota(total_bytes=total, used_bytes=used, free_bytes=free, used_percent=percent)
+
+
+def _deserialize_files(raw: object) -> list[FileItem]:
+    if not isinstance(raw, list):
+        return []
+    output: list[FileItem] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        output.append(
+            FileItem(
+                file_id=str(item.get("file_id", "")),
+                name=str(item.get("name", "unnamed.pwmb")),
+                size_bytes=_to_int(item.get("size_bytes"), default=0),
+                upload_time=_to_optional_str(item.get("upload_time")),
+                created_at=_to_optional_str(item.get("created_at")),
+                updated_at=_to_optional_str(item.get("updated_at")),
+                status=_to_optional_str(item.get("status")),
+                status_code=_to_optional_int(item.get("status_code")),
+                thumbnail_url=_to_optional_str(item.get("thumbnail_url")),
+                download_url=_to_optional_str(item.get("download_url")),
+                gcode_id=_to_optional_str(item.get("gcode_id")),
+                layer_count=_to_optional_int(item.get("layer_count")),
+                print_time_s=_to_optional_int(item.get("print_time_s")),
+                layer_thickness_mm=_to_optional_float(item.get("layer_thickness_mm")),
+                machine_name=_to_optional_str(item.get("machine_name")),
+                region=_to_optional_str(item.get("region")),
+                bucket=_to_optional_str(item.get("bucket")),
+                object_path=_to_optional_str(item.get("object_path")),
+            )
+        )
+    return output
+
+
+def _to_int(value: object, *, default: int = 0) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_float(value: object, *, default: float = 0.0) -> float:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text else None
 
 
 def _validate_connection(
@@ -225,33 +468,123 @@ def _validate_connection(
         return False, str(exc)
 
 
-def _ensure_session_ready(
+def _bootstrap_startup(
     *,
+    window,
     config: AppConfig,
     client: CloudHttpClient,
     api: AnycubicCloudApi,
     logger: logging.Logger,
-) -> bool:
-    has_session_file = config.session_path.exists()
-    has_token = bool(client.session_data.tokens)
+    session_import_cb: ImportHarCallback,
+    refresh_cb,
+    cache_store: CacheStore,
+) -> None:
+    files_tab = getattr(window, "_files_tab_controller", None)
 
-    if has_session_file and has_token:
-        valid, _msg = _validate_connection(api=api, logger=logger)
-        if valid:
-            return True
-        logger.info("Session file exists but token is invalid. Opening HAR import dialog.")
-    else:
-        logger.info("No valid token in session file. Opening HAR import dialog.")
+    if files_tab is not None:
+        cached_quota, cached_files = _load_startup_snapshot(cache_store=cache_store, config=config)
+        if cached_quota is not None or cached_files:
+            files_tab.apply_refresh_result(
+                quota=cached_quota,
+                files=cached_files,
+                error_message="Loaded from local cache while syncing cloud data.",
+            )
 
-    import_cb = _make_session_import_callback(client=client, api=api, logger=logger)
-    _open_session_settings_dialog(None, config=config, on_import_har=import_cb)
+    _start_refresh_job(
+        window=window,
+        config=config,
+        client=client,
+        api=api,
+        logger=logger,
+        session_import_cb=session_import_cb,
+        refresh_cb=refresh_cb,
+        retry_import=1,
+    )
 
-    # Re-check after dialog close (user may have imported a valid HAR token).
-    has_token_after = bool(client.session_data.tokens)
-    if not has_token_after:
-        return False
-    valid_after, _msg_after = _validate_connection(api=api, logger=logger)
-    return valid_after
+
+def _start_refresh_job(
+    *,
+    window,
+    config: AppConfig,
+    client: CloudHttpClient,
+    api: AnycubicCloudApi,
+    logger: logging.Logger,
+    session_import_cb: ImportHarCallback,
+    refresh_cb,
+    retry_import: int,
+) -> None:
+    qtcore, _qtwidgets = require_qt()
+    files_tab = getattr(window, "_files_tab_controller", None)
+
+    if files_tab is not None:
+        files_tab.set_loading(True, "Loading cloud data...")
+
+    state: dict[str, object] = {}
+
+    def _worker() -> None:
+        if not client.session_data.tokens:
+            state["invalid"] = "No session token found."
+            return
+
+        valid, message = _validate_connection(api=api, logger=logger)
+        if not valid:
+            state["invalid"] = message
+            return
+
+        quota, files, error_message = refresh_cb()
+        state["quota"] = quota
+        state["files"] = files
+        state["error_message"] = error_message
+
+    worker = threading.Thread(target=_worker, daemon=True, name="startup-refresh")
+    worker.start()
+
+    timer = qtcore.QTimer(window)
+    timer.setInterval(80)
+
+    def _poll() -> None:
+        if worker.is_alive():
+            return
+        timer.stop()
+
+        invalid = state.get("invalid")
+        if isinstance(invalid, str):
+            if retry_import > 0:
+                logger.info("Session invalid at startup, opening HAR import dialog: %s", invalid)
+                if files_tab is not None:
+                    files_tab.set_loading(False, "Session invalid. Import HAR required.")
+                _open_session_settings_dialog(window, config=config, on_import_har=session_import_cb)
+                if client.session_data.tokens:
+                    _start_refresh_job(
+                        window=window,
+                        config=config,
+                        client=client,
+                        api=api,
+                        logger=logger,
+                        session_import_cb=session_import_cb,
+                        refresh_cb=refresh_cb,
+                        retry_import=retry_import - 1,
+                    )
+                return
+
+            if files_tab is not None:
+                files_tab.set_loading(False, f"Session invalid: {invalid}")
+            return
+
+        quota = state.get("quota")
+        files = state.get("files")
+        error_message = state.get("error_message")
+        if files_tab is not None:
+            files_tab.apply_refresh_result(
+                quota=quota if isinstance(quota, Quota) else None,
+                files=files if isinstance(files, list) else [],
+                error_message=error_message if isinstance(error_message, str) else None,
+            )
+
+    timer.timeout.connect(_poll)
+    timer.start()
+    window._startup_timer = timer  # type: ignore[attr-defined]
+    window._startup_worker = worker  # type: ignore[attr-defined]
 
 
 def build_main_window(
@@ -259,17 +592,23 @@ def build_main_window(
     config: AppConfig,
     client: CloudHttpClient,
     api: AnycubicCloudApi,
-    auto_refresh_on_start: bool,
+    cache_store: CacheStore,
 ):
     _qtcore, qtwidgets = require_qt()
     logger = logging.getLogger("gui.app")
     session_import_cb = _make_session_import_callback(client=client, api=api, logger=logger)
-    refresh_cb = _make_refresh_files_callback(api=api, logger=logger)
+    refresh_cb = _make_refresh_files_callback(
+        api=api,
+        logger=logger,
+        config=config,
+        cache_store=cache_store,
+    )
 
     window = qtwidgets.QMainWindow()
     window.setObjectName("mainWindow")
     window.setWindowTitle("Anycubic Cloud Client + PWMB Viewer (Phase 3 - Cloud)")
     window.resize(1320, 860)
+    window.setMinimumSize(760, 420)
 
     root = qtwidgets.QWidget(window)
     root_layout = qtwidgets.QVBoxLayout(root)
@@ -319,23 +658,32 @@ def build_main_window(
     root_layout.addWidget(header)
 
     tabs = qtwidgets.QTabWidget(root)
+    files_widget = build_files_tab(
+        window,
+        on_open_viewer=lambda: _open_viewer_dialog(window),
+        on_refresh=refresh_cb,
+        auto_refresh=False,
+        cache_store=cache_store,
+        thumbnail_ttl_s=config.cache_thumbnail_ttl_s,
+    )
     tabs.addTab(
-        build_files_tab(
-            window,
-            on_open_viewer=lambda: _open_viewer_dialog(window),
-            on_refresh=refresh_cb,
-            auto_refresh=auto_refresh_on_start,
-        ),
+        files_widget,
         "Files",
     )
     tabs.addTab(build_printer_tab(window), "Printer")
     tabs.addTab(build_log_tab(window, log_path=config.http_log_path), "Log")
     root_layout.addWidget(tabs, 1)
+
+    window._files_tab_controller = getattr(files_widget, "_files_tab_controller", None)  # type: ignore[attr-defined]
+    window._session_import_cb = session_import_cb  # type: ignore[attr-defined]
+    window._refresh_files_cb = refresh_cb  # type: ignore[attr-defined]
     return window
 
 
 def main(argv: list[str] | None = None) -> int:
     config = AppConfig.from_env()
+    config.cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_store = CacheStore(config.cache_dir)
     _configure_logging(config)
     _enable_fault_handler(config)
     logger = logging.getLogger("gui.app")
@@ -358,15 +706,26 @@ def main(argv: list[str] | None = None) -> int:
     app.aboutToQuit.connect(client.close)
     _install_theme(app, Theme())
 
-    session_ready = _ensure_session_ready(config=config, client=client, api=api, logger=logger)
-
     window = build_main_window(
         config=config,
         client=client,
         api=api,
-        auto_refresh_on_start=session_ready,
+        cache_store=cache_store,
     )
     window.show()
+    qtcore.QTimer.singleShot(
+        0,
+        lambda: _bootstrap_startup(
+            window=window,
+            config=config,
+            client=client,
+            api=api,
+            logger=logger,
+            session_import_cb=getattr(window, "_session_import_cb"),
+            refresh_cb=getattr(window, "_refresh_files_cb"),
+            cache_store=cache_store,
+        ),
+    )
     logger.info("GUI started in phase-3 cloud mode")
     return app.exec()
 

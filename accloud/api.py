@@ -113,12 +113,16 @@ class AnycubicCloudApi:
             updated_at = _to_optional_timestamp_str(
                 pick_first(item_map, "updated_at", "updatedAt", "updateTime", "modifyTime")
             )
+            upload_time = _to_optional_timestamp_str(
+                pick_first(item_map, "upload_time", "uploadTime", "createTime", "createdAt", "created_at")
+            ) or created_at
 
             files.append(
                 FileItem(
                     file_id=file_id or name,
                     name=name,
                     size_bytes=size_bytes,
+                    upload_time=upload_time,
                     created_at=created_at,
                     updated_at=updated_at,
                     status=status_text,
@@ -128,6 +132,13 @@ class AnycubicCloudApi:
                     ),
                     download_url=_to_optional_str(pick_first(item_map, "url", "download_url", "downloadUrl")),
                     gcode_id=_to_optional_str(pick_first(item_map, "gcode_id", "gcodeId")),
+                    layer_count=_to_optional_int(pick_first(item_map, "layers", "layer_count", "layerCount")),
+                    print_time_s=_to_optional_int(
+                        pick_first(item_map, "print_time_s", "printTime", "print_time", "estimate")
+                    ),
+                    layer_thickness_mm=_to_optional_float(
+                        pick_first(item_map, "layer_height", "layerHeight", "thickness")
+                    ),
                     machine_name=_to_optional_str(
                         pick_first(item_map, "machine_name", "machineName", "device_name", "deviceName")
                     ),
@@ -156,7 +167,7 @@ class AnycubicCloudApi:
         data = _extract_data(payload)
         return GcodeInfo(
             layers=_to_optional_int(pick_first(data, "layers", "layer_count", "layerCount")),
-            print_time_s=_to_optional_int(pick_first(data, "print_time_s", "printTime", "print_time")),
+            print_time_s=_to_optional_int(pick_first(data, "print_time_s", "printTime", "print_time", "estimate")),
             resin_volume_ml=_to_optional_float(pick_first(data, "resin_volume_ml", "resinVolume", "resinVolumeMl")),
             extra={k: v for k, v in data.items()},
         )

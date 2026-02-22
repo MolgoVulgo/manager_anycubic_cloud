@@ -1,6 +1,7 @@
 """Cloud layer package."""
 
 from accloud.api import AnycubicCloudApi
+from accloud.cache_store import CacheStore
 from accloud.client import CloudHttpClient
 from accloud.config import AppConfig, RetryConfig
 from accloud.errors import CloudApiError, CloudError, CloudTransportError
@@ -10,6 +11,7 @@ __all__ = [
     "AnycubicCloudApi",
     "AppConfig",
     "CloudApiError",
+    "CacheStore",
     "CloudError",
     "CloudHttpClient",
     "CloudTransportError",

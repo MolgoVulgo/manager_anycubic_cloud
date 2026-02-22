@@ -35,6 +35,10 @@ class AppConfig:
     public_app_secret: str = "0cf75926606049a3937f56b0373b99fb"
     timeout_s: float = 20.0
     session_path: Path = Path("session.json")
+    cache_dir: Path = Path.home() / ".cache" / "acm"
+    cache_startup_ttl_s: int = 600
+    cache_gcode_ttl_s: int = 86400
+    cache_thumbnail_ttl_s: int = 86400 * 7
     http_log_path: Path = Path("accloud_http.log")
     http_log_retention_days: int = 14
     fault_log_path: Path = Path("accloud_fault.log")
@@ -64,6 +68,19 @@ class AppConfig:
             public_app_secret=os.getenv("ACCLOUD_PUBLIC_APP_SECRET", defaults.public_app_secret),
             timeout_s=float(os.getenv("ACCLOUD_TIMEOUT_S", str(defaults.timeout_s))),
             session_path=Path(os.getenv("ACCLOUD_SESSION_PATH", str(defaults.session_path))),
+            cache_dir=Path(os.getenv("ACCLOUD_CACHE_DIR", str(defaults.cache_dir))),
+            cache_startup_ttl_s=max(
+                0,
+                int(os.getenv("ACCLOUD_CACHE_STARTUP_TTL_S", str(defaults.cache_startup_ttl_s))),
+            ),
+            cache_gcode_ttl_s=max(
+                0,
+                int(os.getenv("ACCLOUD_CACHE_GCODE_TTL_S", str(defaults.cache_gcode_ttl_s))),
+            ),
+            cache_thumbnail_ttl_s=max(
+                0,
+                int(os.getenv("ACCLOUD_CACHE_THUMBNAIL_TTL_S", str(defaults.cache_thumbnail_ttl_s))),
+            ),
             http_log_path=Path(os.getenv("ACCLOUD_HTTP_LOG_PATH", str(defaults.http_log_path))),
             http_log_retention_days=max(
                 1,

@@ -16,6 +16,7 @@ class FileItem:
     file_id: str
     name: str
     size_bytes: int
+    upload_time: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
     status: str | None = None
@@ -23,6 +24,9 @@ class FileItem:
     thumbnail_url: str | None = None
     download_url: str | None = None
     gcode_id: str | None = None
+    layer_count: int | None = None
+    print_time_s: int | None = None
+    layer_thickness_mm: float | None = None
     machine_name: str | None = None
     region: str | None = None
     bucket: str | None = None

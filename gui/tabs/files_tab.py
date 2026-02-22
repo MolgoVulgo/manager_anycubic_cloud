@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import logging
+import queue
+import threading
 
 import httpx
 
+from accloud.cache_store import CacheStore
 from accloud.models import FileItem, Quota
 from accloud.utils import format_bytes
 from gui.qt_compat import require_qt
-from gui.widgets import apply_fade_in, connect_stub_action, make_badge, make_metric_card, make_panel
+from gui.widgets import apply_fade_in, connect_stub_action, make_panel
 
 
 RefreshCallback = Callable[[], tuple[Quota | None, list[FileItem], str | None]]
@@ -24,19 +27,6 @@ def _require_qt_gui():
     return QtGui
 
 
-def _status_badge_from_file(file_item: FileItem):
-    status = (file_item.status or "Unknown").strip().lower()
-    if status in {"ready", "online", "done", "uploaded"}:
-        return make_badge("READY", "ok"), "READY"
-    if status in {"printing", "running"}:
-        return make_badge("PRINTING", "warn"), "PRINTING"
-    if status in {"queued", "pending"}:
-        return make_badge("QUEUED", "warn"), "QUEUED"
-    if status in {"error", "failed", "offline"}:
-        return make_badge("ERROR", "danger"), "ERROR"
-    return make_badge(status.upper() if status else "UNKNOWN", "warn"), status.upper() if status else "UNKNOWN"
-
-
 class FilesTab:
     def __init__(
         self,
@@ -44,49 +34,67 @@ class FilesTab:
         *,
         on_open_viewer: Callable | None = None,
         on_refresh: RefreshCallback | None = None,
+        cache_store: CacheStore | None = None,
+        thumbnail_ttl_s: int = 0,
     ) -> None:
-        _qtcore, qtwidgets = require_qt()
+        qtcore, qtwidgets = require_qt()
+        self._qtcore = qtcore
         self._qtwidgets = qtwidgets
         self._logger = logging.getLogger("gui.files")
         self._on_open_viewer = on_open_viewer
         self._on_refresh = on_refresh
-        self._all_files: list[FileItem] = []
+        self._cache_store = cache_store
+        self._thumbnail_ttl_s = max(0, int(thumbnail_ttl_s))
+        self._files: list[FileItem] = []
+        self._quota: Quota | None = None
         self._thumbnail_cache: dict[str, object] = {}
         self._thumbnail_failed: set[str] = set()
+        self._thumbnail_inflight: set[str] = set()
+        self._thumbnail_done_queue: queue.SimpleQueue[str] = queue.SimpleQueue()
+        self._thumbnail_semaphore = threading.BoundedSemaphore(4)
+        self._refresh_timer: object | None = None
+        self._refresh_thread: threading.Thread | None = None
+        self._refresh_result: dict[str, object] = {}
 
         self.root = qtwidgets.QWidget(parent)
         self.root.setObjectName("tabRoot")
+        self.root.setMinimumHeight(280)
 
         layout = qtwidgets.QVBoxLayout(self.root)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(14)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
 
         title = qtwidgets.QLabel("Cloud Files")
         title.setObjectName("title")
-        subtitle = qtwidgets.QLabel(
-            "Quota, fichiers cloud et miniatures sont alimentes depuis les endpoints workbench."
-        )
+        subtitle = qtwidgets.QLabel("Vue condensee: quota, fichiers et miniatures (100x100).")
         subtitle.setObjectName("subtitle")
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
         layout.addLayout(self._build_toolbar())
-        layout.addLayout(self._build_metrics())
-        layout.addWidget(self._build_filters())
+        layout.addWidget(self._build_quota_summary())
 
         self._status_label = qtwidgets.QLabel("")
         self._status_label.setObjectName("subtitle")
+        self._status_label.setWordWrap(True)
         layout.addWidget(self._status_label)
 
         self._cards_panel = make_panel(parent=self.root, object_name="panel")
         cards_layout = qtwidgets.QVBoxLayout(self._cards_panel)
-        cards_layout.setContentsMargins(8, 8, 8, 8)
-        cards_layout.setSpacing(8)
+        cards_layout.setContentsMargins(6, 6, 6, 6)
+        cards_layout.setSpacing(6)
         self._cards_scroll = qtwidgets.QScrollArea(self._cards_panel)
         self._cards_scroll.setWidgetResizable(True)
         self._cards_scroll.setFrameShape(qtwidgets.QFrame.Shape.NoFrame)
+        self._cards_scroll.setVerticalScrollBarPolicy(self._qtcore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._cards_scroll.setHorizontalScrollBarPolicy(self._qtcore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         cards_layout.addWidget(self._cards_scroll)
         layout.addWidget(self._cards_panel, 1)
+
+        self._thumbnail_timer = qtcore.QTimer(self.root)
+        self._thumbnail_timer.setInterval(180)
+        self._thumbnail_timer.timeout.connect(self._drain_thumbnail_updates)
+        self._thumbnail_timer.start()
 
         apply_fade_in(self.root)
         self.render_files([])
@@ -108,59 +116,84 @@ class FilesTab:
         row.addStretch(1)
         return row
 
-    def _build_metrics(self):
-        layout = self._qtwidgets.QHBoxLayout()
-        layout.setSpacing(10)
-        self._metric_total = make_metric_card("Total", "-", "Account quota", parent=self.root)
-        self._metric_used = make_metric_card("Used", "-", "Used quota", parent=self.root)
-        self._metric_free = make_metric_card("Free", "-", "Available", parent=self.root)
-        self._metric_files = make_metric_card("Files", "0", "Visible / total", parent=self.root)
-        for metric in [self._metric_total, self._metric_used, self._metric_free, self._metric_files]:
-            layout.addWidget(metric, 1)
-        return layout
-
-    def _build_filters(self):
+    def _build_quota_summary(self):
         qtwidgets = self._qtwidgets
-        panel = make_panel(parent=self.root, object_name="panel")
-        layout = qtwidgets.QHBoxLayout(panel)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(10)
-
-        self._search_input = qtwidgets.QLineEdit()
-        self._search_input.setPlaceholderText("Search file by name, machine, id, or path")
-        self._search_input.textChanged.connect(self._apply_filters)
-        layout.addWidget(self._search_input, 3)
-
-        self._status_filter = qtwidgets.QComboBox()
-        self._status_filter.addItems(["All status", "Ready", "Printing", "Queued", "Error"])
-        self._status_filter.currentIndexChanged.connect(self._apply_filters)
-        layout.addWidget(self._status_filter, 1)
-
-        self._page_size_filter = qtwidgets.QComboBox()
-        self._page_size_filter.addItems(["20 rows", "50 rows", "100 rows"])
-        self._page_size_filter.currentIndexChanged.connect(self._apply_filters)
-        layout.addWidget(self._page_size_filter, 1)
-
-        self._sort_filter = qtwidgets.QComboBox()
-        self._sort_filter.addItems(["Newest first", "Oldest first", "Largest first", "Name A-Z"])
-        self._sort_filter.currentIndexChanged.connect(self._apply_filters)
-        layout.addWidget(self._sort_filter, 1)
+        panel = make_panel(parent=self.root, object_name="card")
+        row = qtwidgets.QHBoxLayout(panel)
+        row.setContentsMargins(10, 8, 10, 8)
+        row.setSpacing(8)
+        self._quota_summary_label = qtwidgets.QLabel("Quota: - | Files: 0")
+        self._quota_summary_label.setObjectName("subtitle")
+        self._quota_summary_label.setWordWrap(True)
+        row.addWidget(self._quota_summary_label, 1)
         return panel
+
+    def set_loading(self, loading: bool, message: str | None = None) -> None:
+        self._refresh_button.setEnabled(not loading)
+        if message is not None:
+            self._status_label.setText(message)
 
     def refresh(self) -> None:
         if self._on_refresh is None:
             self._status_label.setText("No cloud refresh callback configured.")
             return
+        if self._refresh_thread is not None and self._refresh_thread.is_alive():
+            return
 
-        self._refresh_button.setEnabled(False)
-        try:
-            quota, files, error_message = self._on_refresh()
-        finally:
-            self._refresh_button.setEnabled(True)
+        self.set_loading(True, "Loading cloud data...")
+        self._refresh_result = {}
 
+        def _worker() -> None:
+            try:
+                quota, files, error_message = self._on_refresh()
+                self._refresh_result["quota"] = quota
+                self._refresh_result["files"] = files
+                self._refresh_result["error_message"] = error_message
+            except Exception as exc:
+                self._refresh_result["exception"] = str(exc)
+
+        self._refresh_thread = threading.Thread(target=_worker, daemon=True, name="files-refresh")
+        self._refresh_thread.start()
+
+        timer = self._qtcore.QTimer(self.root)
+        timer.setInterval(70)
+        timer.timeout.connect(self._poll_refresh_result)
+        timer.start()
+        self._refresh_timer = timer
+
+    def _poll_refresh_result(self) -> None:
+        if self._refresh_thread is not None and self._refresh_thread.is_alive():
+            return
+
+        if self._refresh_timer is not None:
+            self._refresh_timer.stop()
+            self._refresh_timer = None
+
+        exception = self._refresh_result.get("exception")
+        if exception:
+            self.set_loading(False, f"Refresh failed: {exception}")
+            return
+
+        quota = self._refresh_result.get("quota")
+        files = self._refresh_result.get("files")
+        error_message = self._refresh_result.get("error_message")
+        self.apply_refresh_result(
+            quota=quota if isinstance(quota, Quota) else None,
+            files=files if isinstance(files, list) else [],
+            error_message=error_message if isinstance(error_message, str) else None,
+        )
+
+    def apply_refresh_result(
+        self,
+        *,
+        quota: Quota | None,
+        files: list[FileItem],
+        error_message: str | None,
+    ) -> None:
         if quota is not None:
             self.set_quota(quota)
         self.render_files(files)
+        self.set_loading(False)
         if error_message:
             self._status_label.setText(error_message)
         elif files:
@@ -169,35 +202,32 @@ class FilesTab:
             self._status_label.setText("No file returned by cloud API.")
 
     def set_quota(self, quota: Quota) -> None:
-        self._set_metric_value(self._metric_total, format_bytes(quota.total_bytes))
-        self._set_metric_value(self._metric_used, f"{format_bytes(quota.used_bytes)} ({quota.used_percent:.1f}%)")
-        self._set_metric_value(self._metric_free, format_bytes(quota.free_bytes))
+        self._quota = quota
+        self._update_quota_summary()
 
     def render_files(self, files: list[FileItem]) -> None:
-        self._all_files = list(files)
-        self._apply_filters()
+        self._files = list(files)
+        self._update_quota_summary()
+        self._render_file_cards(self._files)
 
-    def _apply_filters(self) -> None:
-        search = self._search_input.text().strip().lower() if hasattr(self, "_search_input") else ""
-        status_label = self._status_filter.currentText().strip().lower() if hasattr(self, "_status_filter") else "all status"
-        sort_label = self._sort_filter.currentText().strip().lower() if hasattr(self, "_sort_filter") else "newest first"
-        page_size = self._selected_page_size()
+    def _update_quota_summary(self) -> None:
+        if self._quota is None:
+            self._quota_summary_label.setText(f"Quota: - | Files: {len(self._files)}")
+            return
 
-        filtered = [item for item in self._all_files if self._matches_filters(item, search=search, status=status_label)]
-        filtered.sort(key=lambda item: self._sort_key(item, sort_label=sort_label))
-        if sort_label in {"newest first", "largest first"}:
-            filtered.reverse()
-
-        visible = filtered[:page_size]
-        self._render_file_cards(visible)
-        self._set_metric_value(self._metric_files, f"{len(visible)}/{len(self._all_files)}")
+        used = format_bytes(self._quota.used_bytes)
+        total = format_bytes(self._quota.total_bytes)
+        free = format_bytes(self._quota.free_bytes)
+        self._quota_summary_label.setText(
+            f"Quota: {used} / {total} ({self._quota.used_percent:.1f}%) | Free: {free} | Files: {len(self._files)}"
+        )
 
     def _render_file_cards(self, files: list[FileItem]) -> None:
         qtwidgets = self._qtwidgets
         container = qtwidgets.QWidget()
         layout = qtwidgets.QVBoxLayout(container)
         layout.setContentsMargins(2, 2, 2, 2)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
         if not files:
             empty = make_panel(parent=container, object_name="cardAlt")
@@ -217,8 +247,8 @@ class FilesTab:
         qtwidgets = self._qtwidgets
         card = make_panel(parent=parent, object_name="cardAlt")
         card_layout = qtwidgets.QHBoxLayout(card)
-        card_layout.setContentsMargins(12, 12, 12, 12)
-        card_layout.setSpacing(12)
+        card_layout.setContentsMargins(10, 10, 10, 10)
+        card_layout.setSpacing(10)
 
         card_layout.addWidget(self._build_thumbnail(file_item, parent=card), 0)
 
@@ -230,52 +260,35 @@ class FilesTab:
         top = qtwidgets.QHBoxLayout()
         name = qtwidgets.QLabel(file_item.name)
         name.setObjectName("title")
-        name.setStyleSheet("font-size: 17px; font-weight: 650;")
+        name.setStyleSheet("font-size: 16px; font-weight: 650;")
         name.setWordWrap(True)
         top.addWidget(name, 1)
-        badge, _badge_text = _status_badge_from_file(file_item)
-        top.addWidget(badge)
+
+        delete_button = qtwidgets.QPushButton("Delete")
+        delete_button.setObjectName("danger")
+        connect_stub_action(delete_button, f"Delete for {file_item.name}")
+        top.addWidget(delete_button, 0)
         right_layout.addLayout(top)
 
-        base_meta = [
-            f"Size: {format_bytes(file_item.size_bytes)}",
-            f"Id: {file_item.file_id}",
+        details = [
+            f"Layers: {file_item.layer_count if file_item.layer_count is not None else '-'}",
+            f"Print: {_format_print_time(file_item.print_time_s)}",
+            f"Upload: {file_item.upload_time or file_item.created_at or '-'}",
+            f"Thickness: {_format_thickness(file_item.layer_thickness_mm)}",
         ]
-        if file_item.updated_at:
-            base_meta.append(f"Updated: {file_item.updated_at}")
-        elif file_item.created_at:
-            base_meta.append(f"Created: {file_item.created_at}")
-        if file_item.gcode_id:
-            base_meta.append(f"GCode: {file_item.gcode_id}")
-        meta = qtwidgets.QLabel(" | ".join(base_meta))
+        details_label = qtwidgets.QLabel(" | ".join(details))
+        details_label.setObjectName("subtitle")
+        details_label.setWordWrap(True)
+        right_layout.addWidget(details_label)
+
+        meta = qtwidgets.QLabel(f"Size: {format_bytes(file_item.size_bytes)} | Id: {file_item.file_id}")
         meta.setObjectName("subtitle")
         meta.setWordWrap(True)
         right_layout.addWidget(meta)
 
-        extras: list[str] = []
-        if file_item.machine_name:
-            extras.append(f"Machine: {file_item.machine_name}")
-        if file_item.region:
-            extras.append(f"Region: {file_item.region}")
-        if file_item.bucket:
-            extras.append(f"Bucket: {file_item.bucket}")
-        if extras:
-            extra_label = qtwidgets.QLabel(" | ".join(extras))
-            extra_label.setObjectName("subtitle")
-            extra_label.setWordWrap(True)
-            right_layout.addWidget(extra_label)
-
-        if file_item.object_path:
-            path_label = qtwidgets.QLabel(f"Path: {file_item.object_path}")
-            path_label.setObjectName("subtitle")
-            path_label.setWordWrap(True)
-            right_layout.addWidget(path_label)
-
         actions = qtwidgets.QHBoxLayout()
-        for label in ["Details", "Print", "Download", "Delete"]:
+        for label in ["Details", "Print", "Download"]:
             button = qtwidgets.QPushButton(label)
-            if label == "Delete":
-                button.setObjectName("danger")
             connect_stub_action(button, f"{label} for {file_item.name}")
             actions.addWidget(button)
 
@@ -298,7 +311,6 @@ class FilesTab:
         try:
             self._on_open_viewer(file_item)
         except TypeError:
-            # Backward compatibility: existing callback may not accept file argument.
             self._on_open_viewer()
 
     def _build_thumbnail(self, file_item: FileItem, parent):
@@ -358,21 +370,60 @@ class FilesTab:
         if url in self._thumbnail_failed:
             return None
 
-        try:
-            response = httpx.get(url, timeout=5.0, follow_redirects=True)
-        except Exception as exc:
-            self._thumbnail_failed.add(url)
-            self._logger.debug("Thumbnail fetch failed url=%s error=%s", url, exc)
-            return None
+        payload: bytes | None = None
+        if self._cache_store is not None:
+            payload = self._cache_store.load_thumbnail(url, max_age_s=self._thumbnail_ttl_s)
 
-        try:
-            if response.status_code not in (200, 201):
+        if payload is not None:
+            pixmap = self._pixmap_from_bytes(url, payload)
+            if pixmap is not None:
+                return pixmap
+
+        self._schedule_thumbnail_download(url)
+        return None
+
+    def _schedule_thumbnail_download(self, url: str) -> None:
+        if url in self._thumbnail_inflight or url in self._thumbnail_failed:
+            return
+        self._thumbnail_inflight.add(url)
+
+        def _worker() -> None:
+            try:
+                with self._thumbnail_semaphore:
+                    response = httpx.get(url, timeout=5.0, follow_redirects=True)
+                    try:
+                        if response.status_code not in (200, 201):
+                            self._thumbnail_failed.add(url)
+                            return
+                        payload = response.content
+                    finally:
+                        response.close()
+
+                if self._cache_store is not None:
+                    self._cache_store.save_thumbnail(url, payload)
+            except Exception as exc:
                 self._thumbnail_failed.add(url)
-                return None
-            payload = response.content
-        finally:
-            response.close()
+                self._logger.debug("Thumbnail fetch failed url=%s error=%s", url, exc)
+            finally:
+                self._thumbnail_inflight.discard(url)
+                self._thumbnail_done_queue.put(url)
 
+        thread = threading.Thread(target=_worker, daemon=True, name="thumbnail-fetch")
+        thread.start()
+
+    def _drain_thumbnail_updates(self) -> None:
+        has_update = False
+        while True:
+            try:
+                _ = self._thumbnail_done_queue.get_nowait()
+            except queue.Empty:
+                break
+            has_update = True
+
+        if has_update and self._files:
+            self._render_file_cards(self._files)
+
+    def _pixmap_from_bytes(self, url: str, payload: bytes):
         try:
             qtgui = _require_qt_gui()
             pixmap = qtgui.QPixmap()
@@ -386,62 +437,22 @@ class FilesTab:
             self._logger.debug("Thumbnail decode failed url=%s error=%s", url, exc)
             return None
 
-    def _selected_page_size(self) -> int:
-        if not hasattr(self, "_page_size_filter"):
-            return 20
-        text = self._page_size_filter.currentText().strip().split(" ", 1)[0]
-        try:
-            value = int(text)
-        except ValueError:
-            return 20
-        return max(1, min(500, value))
 
-    @staticmethod
-    def _matches_filters(file_item: FileItem, *, search: str, status: str) -> bool:
-        if search:
-            haystack = " ".join(
-                filter(
-                    None,
-                    [
-                        file_item.name,
-                        file_item.file_id,
-                        file_item.machine_name or "",
-                        file_item.object_path or "",
-                    ],
-                )
-            ).lower()
-            if search not in haystack:
-                return False
+def _format_print_time(value: int | None) -> str:
+    if value is None or value <= 0:
+        return "-"
+    total = int(value)
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
 
-        if status != "all status":
-            normalized = (file_item.status or "").lower()
-            if status == "ready" and normalized != "ready":
-                return False
-            if status == "printing" and normalized != "printing":
-                return False
-            if status == "queued" and normalized != "queued":
-                return False
-            if status == "error" and normalized != "error":
-                return False
-        return True
 
-    @staticmethod
-    def _sort_key(file_item: FileItem, *, sort_label: str):
-        if sort_label == "largest first":
-            return file_item.size_bytes
-        if sort_label == "name a-z":
-            return file_item.name.lower()
-        if sort_label == "oldest first":
-            return file_item.updated_at or file_item.created_at or ""
-        return file_item.updated_at or file_item.created_at or ""
-
-    @staticmethod
-    def _set_metric_value(metric_card, value: str) -> None:
-        _qtcore_unused, qtwidgets = require_qt()
-        for label in metric_card.findChildren(qtwidgets.QLabel):
-            if label.objectName() == "metricValue":
-                label.setText(value)
-                return
+def _format_thickness(value: float | None) -> str:
+    if value is None or value <= 0:
+        return "-"
+    return f"{value:.3f} mm"
 
 
 def build_files_tab(
@@ -449,8 +460,17 @@ def build_files_tab(
     on_open_viewer=None,
     on_refresh: RefreshCallback | None = None,
     auto_refresh: bool = False,
+    cache_store: CacheStore | None = None,
+    thumbnail_ttl_s: int = 0,
 ):
-    tab = FilesTab(parent=parent, on_open_viewer=on_open_viewer, on_refresh=on_refresh)
+    tab = FilesTab(
+        parent=parent,
+        on_open_viewer=on_open_viewer,
+        on_refresh=on_refresh,
+        cache_store=cache_store,
+        thumbnail_ttl_s=thumbnail_ttl_s,
+    )
     if auto_refresh:
         tab.refresh()
+    tab.root._files_tab_controller = tab  # type: ignore[attr-defined]
     return tab.root

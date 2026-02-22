@@ -68,11 +68,15 @@ def test_list_files_maps_catalog_fields_and_status(tmp_path: Path) -> None:
                             "size": 44851383,
                             "status": 1,
                             "gcode_id": 44306216,
+                            "layers": 287,
+                            "estimate": 3114,
+                            "layer_height": 0.05,
                             "url": "https://cdn.example.com/file.pwmb",
                             "thumbnail": "https://cdn.example.com/thumb.jpg",
                             "region": "us-east-2",
                             "bucket": "workbentch",
                             "path": "file/30553490/model.pwmb",
+                            "createTime": 1771717986822,
                             "updateTime": 1771717986822,
                         }
                     ],
@@ -95,6 +99,10 @@ def test_list_files_maps_catalog_fields_and_status(tmp_path: Path) -> None:
     assert item.status == "ready"
     assert item.status_code == 1
     assert item.gcode_id == "44306216"
+    assert item.layer_count == 287
+    assert item.print_time_s == 3114
+    assert item.layer_thickness_mm == 0.05
+    assert item.upload_time is not None and item.upload_time.endswith("UTC")
     assert item.thumbnail_url == "https://cdn.example.com/thumb.jpg"
     assert item.download_url == "https://cdn.example.com/file.pwmb"
     assert item.region == "us-east-2"
