@@ -3,8 +3,8 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
-from pwmb.container import decode_layer, read_pwmb_document
-from pwmb.export import export_layers_to_png
+from pwmb_core.container import decode_layer, read_pwmb_document
+from pwmb_core.export import export_layers_to_png
 
 
 def _framed_table(name: str, payload: bytes) -> bytes:

@@ -5,8 +5,8 @@ import json
 import os
 from pathlib import Path
 
-from accloud.models import SessionData
-from accloud.session_store import (
+from accloud_core.models import SessionData
+from accloud_core.session_store import (
     extract_tokens_from_har,
     load_session,
     merge_sessions,

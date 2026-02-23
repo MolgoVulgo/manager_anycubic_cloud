@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from pwmb.decode_pw0 import Pw0DecodeError, decode_pw0_layer
-from pwmb.decode_pws import PwsConvention, PwsDecodeError, decode_pws_layer, select_pws_convention
-from pwmb.lut import map_color_index_to_intensity, parse_layer_image_color_table
+from pwmb_core.decode_pw0 import Pw0DecodeError, decode_pw0_layer
+from pwmb_core.decode_pws import PwsConvention, PwsDecodeError, decode_pws_layer, select_pws_convention
+from pwmb_core.lut import map_color_index_to_intensity, parse_layer_image_color_table
 
 
 def _pw0_word(color_index: int, run_len: int) -> bytes:

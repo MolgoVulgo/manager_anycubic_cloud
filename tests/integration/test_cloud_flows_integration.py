@@ -5,11 +5,13 @@ from pathlib import Path
 from uuid import UUID
 
 import httpx
+import pytest
 
-from accloud.api import AnycubicCloudApi
-from accloud.client import CloudHttpClient
-from accloud.config import AppConfig, RetryConfig
-from accloud.models import SessionData
+from accloud_core.api import AnycubicCloudApi
+from accloud_core.client import CloudHttpClient
+from accloud_core.config import AppConfig, RetryConfig
+from accloud_core.errors import CloudApiError
+from accloud_core.models import SessionData
 
 
 def _build_client(
@@ -163,8 +165,8 @@ def test_workbench_public_signature_matches_legacy_formula(tmp_path: Path, monke
     app_secret = "0cf75926606049a3937f56b0373b99fb"
     app_version = "1.0.0"
 
-    monkeypatch.setattr("accloud.client.time.time", lambda: fixed_timestamp_s)
-    monkeypatch.setattr("accloud.client.uuid1", lambda: fixed_nonce)
+    monkeypatch.setattr("accloud_core.client.time.time", lambda: fixed_timestamp_s)
+    monkeypatch.setattr("accloud_core.client.uuid1", lambda: fixed_nonce)
 
     seen_headers: list[httpx.Headers] = []
 
@@ -192,3 +194,63 @@ def test_workbench_public_signature_matches_legacy_formula(tmp_path: Path, monke
     raw = f"{app_id}{fixed_timestamp_ms}{app_version}{app_secret}{fixed_nonce}{app_id}"
     expected_signature = hashlib.md5(raw.encode("utf-8"), usedforsecurity=False).hexdigest()
     assert headers.get("xx-signature") == expected_signature
+
+
+def test_auth_recovery_relogin_on_401_replays_request(tmp_path: Path) -> None:
+    state = {"quota_calls": 0, "login_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/p/p/workbench/api/work/index/getUserStore":
+            state["quota_calls"] += 1
+            if state["quota_calls"] == 1:
+                return httpx.Response(401, json={"code": 0, "msg": "invalid token"})
+            return httpx.Response(200, json={"code": 1, "data": {"total_bytes": 100, "used_bytes": 10, "free": 90}})
+        if request.url.path == "/p/p/workbench/api/v3/public/loginWithAccessToken":
+            state["login_calls"] += 1
+            return httpx.Response(
+                200,
+                json={
+                    "code": 1,
+                    "data": {
+                        "token": "RECOVERED-SESSION",
+                        "access_token": "RECOVERED-ACCESS",
+                        "id_token": "RECOVERED-ID",
+                    },
+                },
+            )
+        return httpx.Response(404, json={"error": "not found"})
+
+    session = SessionData(tokens={"access_token": "EXPIRED-ACCESS", "id_token": "VALID-ID", "token": "EXPIRED-SESSION"})
+    client = _build_client(handler=handler, tmp_path=tmp_path, session=session)
+    api = AnycubicCloudApi(client)
+    try:
+        quota = api.get_quota()
+    finally:
+        client.close()
+
+    assert quota.total_bytes == 100
+    assert state["login_calls"] == 1
+    assert state["quota_calls"] == 2
+    assert client.session_data.tokens.get("token") == "RECOVERED-SESSION"
+    assert client.session_data.tokens.get("access_token") == "RECOVERED-ACCESS"
+    assert client.session_data.tokens.get("Authorization") == "Bearer RECOVERED-ACCESS"
+
+
+def test_auth_recovery_failure_surfaces_401(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/p/p/workbench/api/work/index/getUserStore":
+            return httpx.Response(401, json={"code": 0, "msg": "invalid token"})
+        if request.url.path == "/p/p/workbench/api/v3/public/loginWithAccessToken":
+            return httpx.Response(200, json={"code": 0, "msg": "login failed"})
+        return httpx.Response(404, json={"error": "not found"})
+
+    session = SessionData(tokens={"access_token": "EXPIRED-ACCESS", "id_token": "EXPIRED-ID", "token": "EXPIRED-SESSION"})
+    client = _build_client(handler=handler, tmp_path=tmp_path, session=session)
+    api = AnycubicCloudApi(client)
+    try:
+        with pytest.raises(CloudApiError) as exc_info:
+            _ = api.get_quota()
+    finally:
+        client.close()
+
+    assert exc_info.value.status_code == 401

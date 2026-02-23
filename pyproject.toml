@@ -23,11 +23,10 @@ dev = [
 ]
 
 [project.scripts]
-manager-anycubic-cloud = "gui.app:main"
+manager-anycubic-cloud = "app_gui_qt.app:main"
 
 [tool.setuptools.packages.find]
-include = ["accloud*", "pwmb*", "pwmb3d*", "gui*", "tests*"]
+include = ["accloud_core*", "pwmb_core*", "render3d_core*", "app_gui_qt*", "tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-

@@ -27,7 +27,7 @@ if [ -n "${SYSTEM_PYTHON}" ] && [ "${SYSTEM_PYTHON}" != "$(command -v python)" ]
 fi
 
 if [ "${VENV_CAN_RUN}" -eq 0 ] && [ "${SYSTEM_CAN_RUN}" -eq 1 ]; then
-  exec "${SYSTEM_PYTHON}" -m gui.app "$@"
+  exec "${SYSTEM_PYTHON}" -m app_gui_qt.app "$@"
 fi
 
 if [ ! -f "${DEPS_STAMP}" ] || [ "${ROOT_DIR}/pyproject.toml" -nt "${DEPS_STAMP}" ] || [ "${VENV_CAN_RUN}" -eq 0 ]; then
@@ -39,11 +39,11 @@ if [ ! -f "${DEPS_STAMP}" ] || [ "${ROOT_DIR}/pyproject.toml" -nt "${DEPS_STAMP}
 fi
 
 if python -c "${REQUIRED_IMPORTS}" >/dev/null 2>&1; then
-  exec python -m gui.app "$@"
+  exec python -m app_gui_qt.app "$@"
 fi
 
 if [ "${SYSTEM_CAN_RUN}" -eq 1 ]; then
-  exec "${SYSTEM_PYTHON}" -m gui.app "$@"
+  exec "${SYSTEM_PYTHON}" -m app_gui_qt.app "$@"
 fi
 
 echo "Error: missing dependencies (PySide6, httpx, numpy)." >&2

@@ -4,10 +4,10 @@ from pathlib import Path
 
 import httpx
 
-from accloud.api import AnycubicCloudApi
-from accloud.client import CloudHttpClient
-from accloud.config import AppConfig, RetryConfig
-from accloud.models import SessionData
+from accloud_core.api import AnycubicCloudApi
+from accloud_core.client import CloudHttpClient
+from accloud_core.config import AppConfig, RetryConfig
+from accloud_core.models import SessionData
 
 
 def _build_client(*, handler, tmp_path: Path) -> CloudHttpClient:
