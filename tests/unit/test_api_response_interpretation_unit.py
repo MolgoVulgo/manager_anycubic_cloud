@@ -165,10 +165,18 @@ def test_list_printers_maps_cloud_fields_and_online_state(tmp_path: Path) -> Non
                             "material_type": "Resin",
                             "material_used": "23127.1ml",
                             "print_totaltime": "642h53m",
+                            "base": {"print_count": 58},
                             "machine_type": 107,
                             "key": "device-key",
                             "img": "https://cdn.example.com/printer.png",
                             "status": 1,
+                            "print_status": 1,
+                            "gcode_name": "raven_skull_19_v3.pwmb",
+                            "progress": 14,
+                            "remain_time": 218,
+                            "print_time": 38,
+                            "taskid": 72244987,
+                            "settings": "{\"curr_layer\":155,\"total_layers\":1073}",
                         },
                         {
                             "id": 42860,
@@ -199,9 +207,70 @@ def test_list_printers_maps_cloud_fields_and_online_state(tmp_path: Path) -> Non
     assert printer_online.state == "printing"
     assert printer_online.printer_type == "LCD"
     assert printer_online.material_used == "23127.1ml"
+    assert printer_online.print_count == 58
     assert printer_online.last_update_time is not None and printer_online.last_update_time.endswith("UTC")
+    assert printer_online.current_file_name == "raven_skull_19_v3.pwmb"
+    assert printer_online.progress_percent == 14
+    assert printer_online.remain_time_min == 218
+    assert printer_online.elapsed_time_min == 38
+    assert printer_online.current_layer == 155
+    assert printer_online.total_layers == 1073
+    assert printer_online.task_id == "72244987"
+    assert printer_online.print_status == 1
 
     printer_offline = printers[1]
     assert printer_offline.printer_id == "42860"
     assert printer_offline.online is False
     assert printer_offline.state == "offline"
+
+
+def test_list_printers_uses_nested_project_fields_when_needed(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/p/p/workbench/api/work/printer/getPrinters":
+            return httpx.Response(
+                200,
+                json={
+                    "code": 1,
+                    "data": [
+                        {
+                            "id": 42859,
+                            "name": "Anycubic Photon M3 Plus",
+                            "model": "Anycubic Photon M3 Plus",
+                            "type": "LCD",
+                            "device_status": 1,
+                            "is_printing": 2,
+                            "project": {
+                                "name": "raven_skull_19_v3.pwmb",
+                                "progress": 27,
+                                "remain_time": 190,
+                                "print_time": 44,
+                                "curr_layer": 201,
+                                "total_layers": 1073,
+                                "task_id": 72244987,
+                                "print_status": 1,
+                            },
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(404, json={"error": "not found"})
+
+    client = _build_client(handler=handler, tmp_path=tmp_path)
+    api = AnycubicCloudApi(client)
+    try:
+        printers = api.list_printers()
+    finally:
+        client.close()
+
+    assert len(printers) == 1
+    printer = printers[0]
+    assert printer.online is True
+    assert printer.state == "printing"
+    assert printer.current_file_name == "raven_skull_19_v3.pwmb"
+    assert printer.progress_percent == 27
+    assert printer.remain_time_min == 190
+    assert printer.elapsed_time_min == 44
+    assert printer.current_layer == 201
+    assert printer.total_layers == 1073
+    assert printer.task_id == "72244987"
+    assert printer.print_status == 1

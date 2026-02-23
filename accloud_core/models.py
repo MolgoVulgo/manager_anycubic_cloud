@@ -68,9 +68,18 @@ class Printer:
     material_type: str | None = None
     material_used: str | None = None
     print_total_time: str | None = None
+    print_count: int | None = None
     image_url: str | None = None
     machine_type: int | None = None
     key: str | None = None
+    current_file_name: str | None = None
+    progress_percent: int | None = None
+    remain_time_min: int | None = None
+    elapsed_time_min: int | None = None
+    current_layer: int | None = None
+    total_layers: int | None = None
+    task_id: str | None = None
+    print_status: int | None = None
 
 
 @dataclass(slots=True)

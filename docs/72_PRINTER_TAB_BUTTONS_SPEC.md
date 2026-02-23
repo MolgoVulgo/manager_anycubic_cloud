@@ -20,6 +20,11 @@ Documenter les differents boutons de l'onglet `Printer` et expliquer leur compor
 
 2. **Donnees affichees**
 - Cartes imprimantes dynamiques apres refresh cloud (ou demo locale si pas de callback).
+- Les cartes affichent aussi les infos job quand disponibles: nom du fichier, progression, temps ecoule, temps restant, couches courante/total.
+  - Sources des infos job:
+    - `GET /p/p/workbench/api/work/printer/getPrinters` (bloc `project` si present).
+    - `GET /p/p/workbench/api/work/project/getProjects` (tentative `print_status=1`, puis fallback sans filtre si vide).
+  - En cas de reponse vide sur `getProjects`, l'UI conserve les infos job deja presentes dans `getPrinters` au lieu de les effacer.
 - Bloc `Preview Payload` en lecture seule, mis a jour avec l'imprimante selectionnee.
 
 ### Boutons de la toolbar (haut de l'onglet)
@@ -30,65 +35,36 @@ Documenter les differents boutons de l'onglet `Printer` et expliquer leur compor
   - Lance `PrinterTab.refresh()`.
   - Execute le callback cloud dans un thread (`printers-refresh`).
   - Met a jour cartes/metriques/payload via `render_printers(...)`.
-
-2. **`Add filter`**
-- Emplacement: barre d'actions en haut.
-- Etat: **actif**.
-- Action actuelle:
-  - Affiche/masque un filtre (`All/Online/Printing/Offline`).
-  - Applique le filtrage des cartes sans appel reseau.
-
-3. **`Bulk print check`**
-- Emplacement: barre d'actions en haut.
-- Etat: **actif**.
-- Action actuelle:
-  - Calcule un resume (`loaded/online/printing/idle/offline`).
-  - Affiche le resultat dans une popup.
+  - Un auto-refresh periodique est aussi actif en mode app principal (toutes les 30 secondes).
 
 ### Boutons par carte imprimante
 Pour chaque carte imprimante affichee (cloud ou demo):
 
-1. **`Open print dialog`**
-- Emplacement: rangee d'actions de la carte.
-- Etat: **actif conditionnel**.
-- Action actuelle:
-  - Selectionne l'imprimante.
-  - Ouvre le vrai print dialog si callback `on_open_print_dialog` fourni.
-  - Sinon affiche "No print dialog callback configured.".
-
-2. **`Live status`**
-- Emplacement: rangee d'actions de la carte.
-- Etat: **actif**.
-- Action actuelle: affiche un snapshot statut (online/state/printing/reason/device status/last sync).
-
-3. **`Details`**
+1. **`Details`**
 - Emplacement: rangee d'actions de la carte.
 - Etat: **actif**.
 - Action actuelle: ouvre une boite `Printer Details` avec details complets en lecture seule.
 
 ### Bouton lateral (panneau droit)
-1. **`Open Print Dialog`**
-- Emplacement: bas du panneau `Preview Payload`.
-- Etat: **actif conditionnel**.
-- Action actuelle:
-  - Ouvre le flux print pour l'imprimante selectionnee (meme logique que le bouton carte).
+1. **Aucun bouton d'action**
+- Le panneau `Preview Payload` reste en lecture seule (sans bouton de lancement).
 
 ### Comportements lies (non-boutons)
 1. **Cartes metriques**
-- `Online`, `Offline`, `Printing`, `Queued jobs`.
+- `Online`, `Offline`, `Printing`, `Jobs history`.
 - Valeurs recalculees a chaque `render_printers(...)` selon les donnees chargees.
 
 2. **Preview Payload**
 - JSON affiche dans `QPlainTextEdit` read-only.
-- Payload de preview mis a jour selon la selection courante (printer_id/printer_name).
+- Payload de preview mis a jour selon la selection courante (printer_id/printer_name + champs job: fichier, progression, temps ecoule/restant).
 
 ### Clarification importante
-- Le bouton global `Print Dialog` dans le header principal (hors onglet `Printer`) ouvre bien la boite de dialogue d'impression.
-- Dans l'onglet `Printer`, les controles sont operationnels cote UI; la partie backend depend des callbacks injectes.
+- Le bouton global `Print Dialog` dans le header principal (hors onglet `Printer`) ouvre la boite de dialogue d'impression.
+- Dans l'onglet `Printer`, l'objectif est le monitoring (etat + metriques + payload), sans action de lancement direct.
 
 ### Contrats d'usage recommandes
 1. Brancher `on_refresh` sur `AnycubicCloudApi.list_printers()` pour un mode cloud complet.
-2. Fournir `on_open_print_dialog` pour connecter les CTA printer au vrai flux print.
+2. Garder l'appel d'enrichissement projets (`getProjects`) actif pour completer les infos de job en cours.
 3. Conserver le mode demo comme fallback si aucun callback n'est configure.
 
 ### Objectif

@@ -350,27 +350,128 @@ class AnycubicCloudApi:
 
     def delete_file(self, file_id: str) -> None:
         endpoint = ENDPOINTS["delete"]
-        _request_json_with_fallback(
-            self._client,
-            endpoint.method,
-            endpoint.path,
-            payload_attempts=(
-                {"idArr": [int(file_id)] if str(file_id).isdigit() else [file_id]},
-                {"idArr": [file_id]},
-            ),
-            expected_status=(200, 201, 202),
+        normalized_file_id = str(file_id).strip()
+        if not normalized_file_id:
+            raise CloudApiError("Cannot delete file without file_id.")
+
+        payload_attempts = (
+            {"idArr": [int(normalized_file_id)] if normalized_file_id.isdigit() else [normalized_file_id]},
+            {"idArr": [normalized_file_id]},
         )
+
+        last_error: CloudApiError | None = None
+        for payload in payload_attempts:
+            try:
+                response_payload = self._client.request_json(
+                    endpoint.method,
+                    endpoint.path,
+                    expected_status=(200, 201, 202),
+                    json=dict(payload),
+                )
+                _assert_success_payload(response_payload)
+                return
+            except CloudApiError as exc:
+                last_error = exc
+                continue
+
+        if last_error is not None:
+            raise last_error
+        raise CloudApiError("Delete file failed.")
 
     def send_print_order(self, file_id: str, printer_id: str) -> None:
         endpoint = ENDPOINTS["print_order"]
-        payload = {"file_id": file_id, "printer_id": printer_id}
-        response = self._client.request(
+        normalized_file_id = str(file_id).strip()
+        normalized_printer_id = str(printer_id).strip()
+        if not normalized_file_id:
+            raise CloudApiError("Cannot send print order without file_id.")
+        if not normalized_printer_id:
+            raise CloudApiError("Cannot send print order without printer_id.")
+
+        # Legacy clients use form payload with nested JSON string in `data`.
+        legacy_data_payload = {
+            "file_id": normalized_file_id,
+            "matrix": "",
+            "filetype": 0,
+            "project_type": 1,
+            "template_id": -2074360784,
+        }
+        legacy_form = {
+            "printer_id": normalized_printer_id,
+            "project_id": "0",
+            "order_id": "1",
+            "is_delete_file": "0",
+            "data": json.dumps(legacy_data_payload, separators=(",", ":"), ensure_ascii=True),
+        }
+
+        # Try the known-working legacy contract first, then fall back to simplified JSON shape.
+        attempts = (
+            {"data": legacy_form},
+            {
+                "json": {
+                    "printer_id": normalized_printer_id,
+                    "project_id": 0,
+                    "order_id": 1,
+                    "is_delete_file": 0,
+                    "data": legacy_data_payload,
+                }
+            },
+            {"json": {"file_id": normalized_file_id, "printer_id": normalized_printer_id}},
+        )
+
+        last_error: CloudApiError | None = None
+        for request_kwargs in attempts:
+            try:
+                payload = self._client.request_json(
+                    endpoint.method,
+                    endpoint.path,
+                    expected_status=(200, 201, 202),
+                    **request_kwargs,
+                )
+                _assert_success_payload(payload)
+                return
+            except CloudApiError as exc:
+                last_error = exc
+                continue
+
+        if last_error is not None:
+            raise last_error
+        raise CloudApiError("Print order failed.")
+
+    def list_projects(
+        self,
+        *,
+        printer_id: str,
+        print_status: int | None = 1,
+        page: int = 1,
+        limit: int = 1,
+    ) -> list[dict[str, Any]]:
+        endpoint = ENDPOINTS["projects"]
+        normalized_printer_id = str(printer_id).strip()
+        if not normalized_printer_id:
+            raise CloudApiError("Cannot list projects without printer_id.")
+
+        params: dict[str, Any] = {
+            "limit": max(1, int(limit)),
+            "page": max(1, int(page)),
+            "printer_id": int(normalized_printer_id) if normalized_printer_id.isdigit() else normalized_printer_id,
+        }
+        if print_status is not None:
+            params["print_status"] = int(print_status)
+        payload = self._client.request_json(
             endpoint.method,
             endpoint.path,
-            expected_status=(200, 201, 202),
-            json=payload,
+            expected_status=(200, 201),
+            params=params,
         )
-        response.close()
+        data = _extract_data(payload)
+        raw_items = _extract_list(data)
+        output: list[dict[str, Any]] = []
+        for raw in raw_items:
+            item_map = _as_map(raw)
+            if not item_map:
+                continue
+            output.append(dict(item_map))
+        return output
 
     def list_printers(self) -> list[Printer]:
         endpoint = ENDPOINTS["printers"]
@@ -380,6 +481,10 @@ class AnycubicCloudApi:
         printers: list[Printer] = []
         for raw in raw_items:
             item_map = _as_map(raw)
+            settings_map = _as_map(pick_first(item_map, "settings"))
+            device_message_map = _as_map(pick_first(item_map, "device_message"))
+            project_map = _as_map(pick_first(item_map, "project"))
+            base_map = _as_map(pick_first(item_map, "base"))
             printer_id = str(pick_first(item_map, "id", "printer_id", "printerId", default="")).strip()
             name = str(pick_first(item_map, "name", "printer_name", "printerName", default=printer_id)).strip()
             available = _to_optional_int(pick_first(item_map, "available"))
@@ -387,6 +492,102 @@ class AnycubicCloudApi:
             status_code = _to_optional_int(pick_first(item_map, "status"))
             is_printing = _to_optional_int(pick_first(item_map, "is_printing"))
             reason = _to_optional_str(pick_first(item_map, "reason", "msg"))
+            progress_percent = _to_optional_int(
+                pick_first(
+                    device_message_map,
+                    "progress",
+                    default=pick_first(
+                        settings_map,
+                        "progress",
+                        default=pick_first(project_map, "progress", default=pick_first(item_map, "progress")),
+                    ),
+                )
+            )
+            remain_time_min = _to_optional_int(
+                pick_first(
+                    device_message_map,
+                    "remain_time",
+                    default=pick_first(
+                        settings_map,
+                        "remain_time",
+                        default=pick_first(project_map, "remain_time", default=pick_first(item_map, "remain_time")),
+                    ),
+                )
+            )
+            elapsed_time_min = _to_optional_int(
+                pick_first(
+                    device_message_map,
+                    "print_time",
+                    default=pick_first(
+                        settings_map,
+                        "print_time",
+                        default=pick_first(project_map, "print_time", default=pick_first(item_map, "print_time")),
+                    ),
+                )
+            )
+            current_layer = _to_optional_int(
+                pick_first(
+                    device_message_map,
+                    "curr_layer",
+                    "current_layer",
+                    default=pick_first(
+                        settings_map,
+                        "curr_layer",
+                        "current_layer",
+                        default=pick_first(project_map, "curr_layer", "current_layer"),
+                    ),
+                )
+            )
+            total_layers = _to_optional_int(
+                pick_first(
+                    device_message_map,
+                    "total_layers",
+                    default=pick_first(
+                        settings_map,
+                        "total_layers",
+                        default=pick_first(project_map, "total_layers"),
+                    ),
+                )
+            )
+            current_file_name = _to_optional_str(
+                pick_first(
+                    device_message_map,
+                    "filename",
+                    "file_name",
+                    default=pick_first(
+                        settings_map,
+                        "filename",
+                        "file_name",
+                        default=pick_first(
+                            project_map,
+                            "name",
+                            "filename",
+                            "gcode_name",
+                            default=pick_first(item_map, "filename", "gcode_name"),
+                        ),
+                    ),
+                )
+            )
+            task_id = _to_optional_str(
+                pick_first(
+                    device_message_map,
+                    "taskid",
+                    "task_id",
+                    default=pick_first(
+                        settings_map,
+                        "taskid",
+                        "task_id",
+                        default=pick_first(
+                            project_map,
+                            "task_id",
+                            "taskid",
+                            "id",
+                            default=pick_first(item_map, "taskid", "id"),
+                        ),
+                    ),
+                )
+            )
+            print_status = _to_optional_int(pick_first(item_map, "print_status", default=pick_first(project_map, "print_status")))
             online = _resolve_printer_online(
                 available=available,
                 device_status=device_status,
@@ -396,7 +597,7 @@ class AnycubicCloudApi:
             state = _resolve_printer_state(
                 online=online,
                 is_printing=is_printing,
-                raw_state=_to_optional_str(pick_first(item_map, "state")),
+                raw_state=_to_optional_str(pick_first(item_map, "state", default=pick_first(project_map, "state"))),
                 reason=reason,
             )
             printers.append(
@@ -417,9 +618,20 @@ class AnycubicCloudApi:
                     material_type=_to_optional_str(pick_first(item_map, "material_type")),
                     material_used=_to_optional_str(pick_first(item_map, "material_used")),
                     print_total_time=_to_optional_str(pick_first(item_map, "print_totaltime", "print_total_time")),
+                    print_count=_to_optional_int(
+                        pick_first(item_map, "print_count", default=pick_first(base_map, "print_count"))
+                    ),
                     image_url=_to_optional_str(pick_first(item_map, "img", "image")),
                     machine_type=_to_optional_int(pick_first(item_map, "machine_type")),
                     key=_to_optional_str(pick_first(item_map, "key")),
+                    current_file_name=current_file_name,
+                    progress_percent=progress_percent,
+                    remain_time_min=remain_time_min,
+                    elapsed_time_min=elapsed_time_min,
+                    current_layer=current_layer,
+                    total_layers=total_layers,
+                    task_id=task_id,
+                    print_status=print_status,
                 )
             )
         return printers

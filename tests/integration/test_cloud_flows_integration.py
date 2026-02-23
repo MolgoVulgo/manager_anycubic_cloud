@@ -192,6 +192,45 @@ def test_cloud_download_prefers_numeric_id_payload_for_numeric_file_id(tmp_path:
     assert output.read_bytes() == b"PWMB-NUMERIC-ID"
 
 
+def test_cloud_list_projects_for_printer_flow(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/p/p/workbench/api/work/project/getProjects":
+            assert request.method == "GET"
+            params = dict(request.url.params)
+            assert params.get("printer_id") == "42859"
+            assert params.get("print_status") == "1"
+            assert params.get("page") == "1"
+            assert params.get("limit") == "1"
+            return httpx.Response(
+                200,
+                json={
+                    "code": 1,
+                    "data": [
+                        {
+                            "taskid": 72244987,
+                            "gcode_name": "raven_skull_19_v3.pwmb",
+                            "progress": 14,
+                            "remain_time": 218,
+                            "print_time": 38,
+                            "settings": "{\"curr_layer\":155,\"total_layers\":1073}",
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(404, json={"error": "not found"})
+
+    client = _build_client(handler=handler, tmp_path=tmp_path)
+    api = AnycubicCloudApi(client)
+    try:
+        projects = api.list_projects(printer_id="42859", print_status=1, page=1, limit=1)
+    finally:
+        client.close()
+
+    assert len(projects) == 1
+    assert str(projects[0]["taskid"]) == "72244987"
+    assert str(projects[0]["gcode_name"]) == "raven_skull_19_v3.pwmb"
+
+
 def test_cloud_upload_signed_url_put_has_no_cloud_auth_headers(tmp_path: Path) -> None:
     source = tmp_path / "upload.pwmb"
     source.write_bytes(b"PWMB-UPLOAD-BINARY")
@@ -233,6 +272,150 @@ def test_cloud_upload_signed_url_put_has_no_cloud_auth_headers(tmp_path: Path) -
 
     assert file_id == "987654"
     assert seen_put_payload == [b"PWMB-UPLOAD-BINARY"]
+
+
+def test_cloud_delete_file_prefers_numeric_id_payload(tmp_path: Path) -> None:
+    seen_payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/p/p/workbench/api/work/index/delFiles":
+            payload = json.loads(request.content.decode("utf-8"))
+            assert isinstance(payload, dict)
+            seen_payloads.append(payload)
+            return httpx.Response(200, json={"code": 1, "data": True})
+        return httpx.Response(404, json={"error": "not found"})
+
+    client = _build_client(handler=handler, tmp_path=tmp_path)
+    api = AnycubicCloudApi(client)
+    try:
+        api.delete_file("53095239")
+    finally:
+        client.close()
+
+    assert seen_payloads
+    id_arr = seen_payloads[0].get("idArr")
+    assert isinstance(id_arr, list) and id_arr
+    assert isinstance(id_arr[0], int)
+
+
+def test_cloud_delete_file_falls_back_to_string_payload_and_succeeds(tmp_path: Path) -> None:
+    seen_payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/p/p/workbench/api/work/index/delFiles":
+            return httpx.Response(404, json={"error": "not found"})
+        payload = json.loads(request.content.decode("utf-8"))
+        assert isinstance(payload, dict)
+        seen_payloads.append(payload)
+        id_arr = payload.get("idArr")
+        if isinstance(id_arr, list) and id_arr and isinstance(id_arr[0], int):
+            return httpx.Response(200, json={"code": 0, "msg": "numeric payload rejected"})
+        return httpx.Response(200, json={"code": 1, "data": True})
+
+    client = _build_client(handler=handler, tmp_path=tmp_path)
+    api = AnycubicCloudApi(client)
+    try:
+        api.delete_file("53095239")
+    finally:
+        client.close()
+
+    assert len(seen_payloads) == 2
+    assert isinstance(seen_payloads[0]["idArr"][0], int)
+    assert isinstance(seen_payloads[1]["idArr"][0], str)
+
+
+def test_cloud_delete_file_surfaces_business_error(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/p/p/workbench/api/work/index/delFiles":
+            return httpx.Response(200, json={"code": 0, "msg": "Delete rejected"})
+        return httpx.Response(404, json={"error": "not found"})
+
+    client = _build_client(handler=handler, tmp_path=tmp_path)
+    api = AnycubicCloudApi(client)
+    try:
+        with pytest.raises(CloudApiError) as exc_info:
+            api.delete_file("53095239")
+    finally:
+        client.close()
+
+    assert "rejected" in str(exc_info.value).lower()
+
+
+def test_cloud_print_order_uses_legacy_form_payload(tmp_path: Path) -> None:
+    seen_calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/p/p/workbench/api/work/operation/sendOrder":
+            seen_calls["count"] += 1
+            assert request.method == "POST"
+            content_type = request.headers.get("content-type", "")
+            assert content_type.startswith("application/x-www-form-urlencoded")
+            body = request.content.decode("utf-8")
+            assert "printer_id=42859" in body
+            assert "project_id=0" in body
+            assert "order_id=1" in body
+            assert "is_delete_file=0" in body
+            assert "file_id" in body
+            return httpx.Response(200, json={"code": 1, "data": {"taskid": 70291599}})
+        return httpx.Response(404, json={"error": "not found"})
+
+    client = _build_client(handler=handler, tmp_path=tmp_path)
+    api = AnycubicCloudApi(client)
+    try:
+        api.send_print_order("30553490", "42859")
+    finally:
+        client.close()
+
+    assert seen_calls["count"] == 1
+
+
+def test_cloud_print_order_falls_back_when_legacy_payload_is_rejected(tmp_path: Path) -> None:
+    seen_calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/p/p/workbench/api/work/operation/sendOrder":
+            return httpx.Response(404, json={"error": "not found"})
+
+        content_type = request.headers.get("content-type", "")
+        if content_type.startswith("application/x-www-form-urlencoded"):
+            seen_calls.append("legacy-form")
+            return httpx.Response(200, json={"code": 0, "msg": "legacy rejected"})
+
+        payload = json.loads(request.content.decode("utf-8"))
+        if "project_id" in payload and "order_id" in payload:
+            seen_calls.append("legacy-json")
+            return httpx.Response(200, json={"code": 0, "msg": "json legacy rejected"})
+
+        seen_calls.append("minimal-json")
+        assert payload["file_id"] == "30553490"
+        assert payload["printer_id"] == "42859"
+        return httpx.Response(200, json={"code": 1, "data": {"taskid": 70291991}})
+
+    client = _build_client(handler=handler, tmp_path=tmp_path)
+    api = AnycubicCloudApi(client)
+    try:
+        api.send_print_order("30553490", "42859")
+    finally:
+        client.close()
+
+    assert seen_calls == ["legacy-form", "legacy-json", "minimal-json"]
+
+
+def test_cloud_print_order_surfaces_business_error(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/p/p/workbench/api/work/operation/sendOrder":
+            return httpx.Response(200, json={"code": 0, "msg": "Printer offline"})
+        return httpx.Response(404, json={"error": "not found"})
+
+    client = _build_client(handler=handler, tmp_path=tmp_path)
+    api = AnycubicCloudApi(client)
+    try:
+        with pytest.raises(CloudApiError) as exc_info:
+            api.send_print_order("30553490", "42859")
+    finally:
+        client.close()
+
+    assert "offline" in str(exc_info.value).lower()
 
 
 def test_cloud_client_retries_transport_errors(tmp_path: Path, monkeypatch) -> None:

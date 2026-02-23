@@ -21,6 +21,7 @@ class PrinterTab:
         *,
         on_open_print_dialog: OpenPrintDialogCallback | None = None,
         on_refresh: RefreshPrintersCallback | None = None,
+        auto_refresh_interval_ms: int = 30_000,
     ) -> None:
         qtcore, qtwidgets = require_qt()
         self._qtcore = qtcore
@@ -33,6 +34,8 @@ class PrinterTab:
         self._refresh_timer: object | None = None
         self._refresh_thread: threading.Thread | None = None
         self._refresh_result: dict[str, object] = {}
+        self._auto_refresh_interval_ms = max(1_000, int(auto_refresh_interval_ms))
+        self._auto_refresh_timer: object | None = None
 
         self.root = qtwidgets.QWidget(parent)
         self.root.setObjectName("tabRoot")
@@ -87,11 +90,6 @@ class PrinterTab:
         self._preview.setObjectName("monoBlock")
         right_layout.addWidget(self._preview, 1)
 
-        self._open_print_button = qtwidgets.QPushButton("Open Print Dialog")
-        self._open_print_button.setObjectName("primary")
-        self._open_print_button.clicked.connect(self._open_print_dialog_for_selected)
-        right_layout.addWidget(self._open_print_button)
-
         board_layout.addWidget(left, 3)
         board_layout.addWidget(right, 2)
 
@@ -103,6 +101,23 @@ class PrinterTab:
             self.render_printers([])
             self._status_label.setText("Press Refresh printers to load cloud data.")
 
+    def start_auto_refresh(self, *, immediate: bool = False) -> None:
+        if self._on_refresh is None:
+            return
+        if self._auto_refresh_timer is None:
+            timer = self._qtcore.QTimer(self.root)
+            timer.setInterval(self._auto_refresh_interval_ms)
+            timer.timeout.connect(self._auto_refresh_tick)
+            timer.start()
+            self._auto_refresh_timer = timer
+        if immediate:
+            self.refresh()
+
+    def _auto_refresh_tick(self) -> None:
+        if self._refresh_thread is not None and self._refresh_thread.is_alive():
+            return
+        self.refresh()
+
     def _build_toolbar(self):
         qtwidgets = self._qtwidgets
         row = qtwidgets.QHBoxLayout()
@@ -111,20 +126,6 @@ class PrinterTab:
         self._refresh_button = qtwidgets.QPushButton("Refresh printers")
         self._refresh_button.clicked.connect(self.refresh)
         row.addWidget(self._refresh_button)
-
-        self._toggle_filter_button = qtwidgets.QPushButton("Add filter")
-        self._toggle_filter_button.clicked.connect(self._toggle_filter)
-        row.addWidget(self._toggle_filter_button)
-
-        self._bulk_button = qtwidgets.QPushButton("Bulk print check")
-        self._bulk_button.clicked.connect(self._run_bulk_print_check)
-        row.addWidget(self._bulk_button)
-
-        self._filter_combo = qtwidgets.QComboBox()
-        self._filter_combo.addItems(["All printers", "Online", "Printing", "Offline"])
-        self._filter_combo.currentTextChanged.connect(self._render_printer_cards)
-        self._filter_combo.setVisible(False)
-        row.addWidget(self._filter_combo, 1)
 
         row.addStretch(1)
         return row
@@ -135,11 +136,11 @@ class PrinterTab:
         self._metric_online = make_metric_card("Online", "0", "Active now", parent=self.root)
         self._metric_offline = make_metric_card("Offline", "0", "Needs attention", parent=self.root)
         self._metric_printing = make_metric_card("Printing", "0", "Current jobs", parent=self.root)
-        self._metric_queued = make_metric_card("Queued jobs", "0", "Ready to start", parent=self.root)
+        self._metric_history = make_metric_card("Jobs history", "0", "Completed jobs", parent=self.root)
         metrics.addWidget(self._metric_online, 1)
         metrics.addWidget(self._metric_offline, 1)
         metrics.addWidget(self._metric_printing, 1)
-        metrics.addWidget(self._metric_queued, 1)
+        metrics.addWidget(self._metric_history, 1)
         return metrics
 
     def refresh(self) -> None:
@@ -218,7 +219,7 @@ class PrinterTab:
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(8)
 
-        printers = self._filtered_printers()
+        printers = self._printers
         if not printers:
             empty = make_panel(parent=container, object_name="cardAlt")
             empty_layout = qtwidgets.QVBoxLayout(empty)
@@ -249,22 +250,24 @@ class PrinterTab:
         layout.addLayout(top)
 
         line_1 = f"Model: {printer.model or '-'}   |   Type: {printer.printer_type or '-'}"
-        line_2 = f"Last sync: {printer.last_update_time or '-'}   |   State: {printer.state or '-'}"
-        line_3 = f"Material: {printer.material_type or '-'} ({printer.material_used or '-'})"
+        line_2 = f"State: {printer.state or '-'}"
+        line_3 = f"Material: {printer.material_type or '-'}"
+        line_4 = (
+            f"File: {_format_file_name(printer.current_file_name)}   |   "
+            f"Progress: {_format_progress(printer.progress_percent)}"
+        )
+        line_5 = (
+            f"Elapsed: {_format_minutes(printer.elapsed_time_min)}   |   "
+            f"Remaining: {_format_minutes(printer.remain_time_min)}   |   "
+            f"Layers: {_format_layers(printer.current_layer, printer.total_layers)}"
+        )
         layout.addWidget(qtwidgets.QLabel(line_1))
         layout.addWidget(qtwidgets.QLabel(line_2))
         layout.addWidget(qtwidgets.QLabel(line_3))
+        layout.addWidget(qtwidgets.QLabel(line_4))
+        layout.addWidget(qtwidgets.QLabel(line_5))
 
         actions = qtwidgets.QHBoxLayout()
-        open_button = qtwidgets.QPushButton("Open print dialog")
-        open_button.setObjectName("primary")
-        open_button.clicked.connect(lambda _checked=False, item=printer: self._open_print_dialog_for(item))
-        actions.addWidget(open_button)
-
-        live_button = qtwidgets.QPushButton("Live status")
-        live_button.clicked.connect(lambda _checked=False, item=printer: self._show_live_status(item))
-        actions.addWidget(live_button)
-
         details_button = qtwidgets.QPushButton("Details")
         details_button.clicked.connect(lambda _checked=False, item=printer: self._show_printer_details(item))
         actions.addWidget(details_button)
@@ -272,82 +275,6 @@ class PrinterTab:
         actions.addStretch(1)
         layout.addLayout(actions)
         return card
-
-    def _filtered_printers(self) -> list[Printer]:
-        if not self._filter_combo.isVisible():
-            return self._printers
-        selected = self._filter_combo.currentText()
-        if selected == "All printers":
-            return self._printers
-        if selected == "Online":
-            return [item for item in self._printers if item.online]
-        if selected == "Printing":
-            return [item for item in self._printers if _is_printing(item)]
-        if selected == "Offline":
-            return [item for item in self._printers if not item.online]
-        return self._printers
-
-    def _toggle_filter(self) -> None:
-        visible = not self._filter_combo.isVisible()
-        self._filter_combo.setVisible(visible)
-        self._toggle_filter_button.setText("Hide filter" if visible else "Add filter")
-        self._render_printer_cards()
-
-    def _run_bulk_print_check(self) -> None:
-        _qtcore, qtwidgets = require_qt()
-        online = sum(1 for item in self._printers if item.online)
-        offline = sum(1 for item in self._printers if not item.online)
-        printing = sum(1 for item in self._printers if _is_printing(item))
-        idle_online = max(online - printing, 0)
-        qtwidgets.QMessageBox.information(
-            self.root,
-            "Bulk print check",
-            "\n".join(
-                [
-                    f"Printers loaded: {len(self._printers)}",
-                    f"Online: {online}",
-                    f"Printing: {printing}",
-                    f"Idle online: {idle_online}",
-                    f"Offline: {offline}",
-                ]
-            ),
-        )
-
-    def _open_print_dialog_for_selected(self) -> None:
-        self._open_print_dialog_for(self._find_selected_printer())
-
-    def _open_print_dialog_for(self, printer: Printer | None) -> None:
-        self._select_printer(printer)
-        if self._on_open_print_dialog is None:
-            _qtcore, qtwidgets = require_qt()
-            qtwidgets.QMessageBox.information(
-                self.root,
-                "Print dialog",
-                "No print dialog callback configured.",
-            )
-            return
-        try:
-            self._on_open_print_dialog(printer)
-        except TypeError:
-            self._on_open_print_dialog(None)
-
-    def _show_live_status(self, printer: Printer) -> None:
-        _qtcore, qtwidgets = require_qt()
-        self._select_printer(printer)
-        status_line = [
-            f"Printer: {printer.name}",
-            f"Online: {'yes' if printer.online else 'no'}",
-            f"State: {printer.state or '-'}",
-            f"Is printing: {printer.is_printing if printer.is_printing is not None else '-'}",
-            f"Reason: {printer.reason or '-'}",
-            f"Device status: {printer.device_status if printer.device_status is not None else '-'}",
-            f"Last sync: {printer.last_update_time or '-'}",
-        ]
-        qtwidgets.QMessageBox.information(
-            self.root,
-            "Live status",
-            "\n".join(status_line),
-        )
 
     def _show_printer_details(self, printer: Printer) -> None:
         _qtcore, qtwidgets = require_qt()
@@ -363,10 +290,17 @@ class PrinterTab:
             f"Description: {printer.description or '-'}",
             f"Device status: {printer.device_status if printer.device_status is not None else '-'}",
             f"Is printing: {printer.is_printing if printer.is_printing is not None else '-'}",
-            f"Last update: {printer.last_update_time or '-'}",
             f"Material type: {printer.material_type or '-'}",
-            f"Material used: {printer.material_used or '-'}",
             f"Print total time: {printer.print_total_time or '-'}",
+            f"History jobs: {printer.print_count if printer.print_count is not None else '-'}",
+            f"Current file: {_format_file_name(printer.current_file_name)}",
+            f"Progress: {_format_progress(printer.progress_percent)}",
+            f"Elapsed time: {_format_minutes(printer.elapsed_time_min)}",
+            f"Remaining time: {_format_minutes(printer.remain_time_min)}",
+            f"Current layer: {printer.current_layer if printer.current_layer is not None else '-'}",
+            f"Total layers: {printer.total_layers if printer.total_layers is not None else '-'}",
+            f"Task ID: {printer.task_id or '-'}",
+            f"Print status: {printer.print_status if printer.print_status is not None else '-'}",
             f"Machine type: {printer.machine_type if printer.machine_type is not None else '-'}",
             f"Key: {printer.key or '-'}",
             f"Image URL: {printer.image_url or '-'}",
@@ -422,18 +356,22 @@ class PrinterTab:
         if selected is not None:
             payload["printer_id"] = selected.printer_id
             payload["printer_name"] = selected.name
+            payload["current_file_name"] = selected.current_file_name
+            payload["progress_percent"] = selected.progress_percent
+            payload["elapsed_time_min"] = selected.elapsed_time_min
+            payload["remain_time_min"] = selected.remain_time_min
         self._preview.setPlainText(json.dumps(payload, ensure_ascii=True, indent=2))
 
     def _update_metrics(self) -> None:
         online = sum(1 for item in self._printers if item.online)
         offline = sum(1 for item in self._printers if not item.online)
         printing = sum(1 for item in self._printers if _is_printing(item))
-        queued = max(online - printing, 0)
+        history_count = sum(max(item.print_count or 0, 0) for item in self._printers)
 
         self._set_metric_value(self._metric_online, str(online))
         self._set_metric_value(self._metric_offline, str(offline))
         self._set_metric_value(self._metric_printing, str(printing))
-        self._set_metric_value(self._metric_queued, str(queued))
+        self._set_metric_value(self._metric_history, str(history_count))
 
     def _set_metric_value(self, metric_card, value: str) -> None:
         for label in metric_card.findChildren(self._qtwidgets.QLabel):
@@ -443,12 +381,26 @@ class PrinterTab:
 
 
 def _is_printing(printer: Printer) -> bool:
-    if printer.is_printing is not None and printer.is_printing > 0:
-        return True
     state = (printer.state or "").strip().lower()
-    if not state:
+    if state in {"printing", "busy", "running", "paused", "pause", "heating", "resuming", "starting"}:
+        return True
+    if state in {"online", "idle", "ready", "finished", "complete", "completed", "stopped", "offline", "error", "failed"}:
         return False
-    return state in {"printing", "busy", "running"}
+
+    if printer.print_status is not None:
+        if printer.print_status == 1:
+            return True
+        if printer.print_status in {0, 2}:
+            return False
+
+    if printer.is_printing is not None:
+        return printer.is_printing > 0
+
+    if printer.progress_percent is not None and 0 < printer.progress_percent < 100:
+        return True
+    if printer.remain_time_min is not None and printer.remain_time_min > 0:
+        return True
+    return False
 
 
 def _status_badge(printer: Printer) -> tuple[str, str]:
@@ -457,6 +409,44 @@ def _status_badge(printer: Printer) -> tuple[str, str]:
     if _is_printing(printer):
         return "PRINTING", "warn"
     return "ONLINE", "ok"
+
+
+def _format_file_name(value: str | None) -> str:
+    if value is None:
+        return "-"
+    text = str(value).strip()
+    if not text:
+        return "-"
+    return text
+
+
+def _format_progress(value: int | None) -> str:
+    if value is None:
+        return "-"
+    if value < 0:
+        return "-"
+    return f"{value}%"
+
+
+def _format_minutes(value: int | None) -> str:
+    if value is None:
+        return "-"
+    if value < 0:
+        return "-"
+    hours, minutes = divmod(value, 60)
+    if hours <= 0:
+        return f"{minutes} min"
+    return f"{hours}h {minutes:02d}m"
+
+
+def _format_layers(current_layer: int | None, total_layers: int | None) -> str:
+    if current_layer is None and total_layers is None:
+        return "-"
+    if current_layer is None:
+        return f"- / {total_layers}"
+    if total_layers is None:
+        return f"{current_layer} / -"
+    return f"{current_layer} / {total_layers}"
 
 
 def _demo_printers() -> list[Printer]:
@@ -473,6 +463,11 @@ def _demo_printers() -> list[Printer]:
             last_update_time="2 min ago",
             material_type="ABS-Like Grey",
             material_used="23260.42ml",
+            print_count=58,
+            current_file_name="-",
+            progress_percent=0,
+            elapsed_time_min=0,
+            remain_time_min=0,
         ),
         Printer(
             printer_id="42860",
@@ -486,6 +481,15 @@ def _demo_printers() -> list[Printer]:
             last_update_time="30 sec ago",
             material_type="Tough Resin",
             material_used="11020.13ml",
+            print_count=77,
+            current_file_name="raven_skull_19_v3.pwmb",
+            progress_percent=14,
+            elapsed_time_min=38,
+            remain_time_min=218,
+            current_layer=155,
+            total_layers=1073,
+            task_id="72244987",
+            print_status=1,
         ),
         Printer(
             printer_id="42861",
@@ -500,6 +504,9 @@ def _demo_printers() -> list[Printer]:
             last_update_time="43 min ago",
             material_type="Water Washable",
             material_used="4201.00ml",
+            print_count=14,
+            current_file_name="-",
+            progress_percent=0,
         ),
     ]
 
@@ -510,13 +517,15 @@ def build_printer_tab(
     on_open_print_dialog: OpenPrintDialogCallback | None = None,
     on_refresh: RefreshPrintersCallback | None = None,
     auto_refresh: bool = False,
+    auto_refresh_interval_ms: int = 30_000,
 ):
     tab = PrinterTab(
         parent=parent,
         on_open_print_dialog=on_open_print_dialog,
         on_refresh=on_refresh,
+        auto_refresh_interval_ms=auto_refresh_interval_ms,
     )
     if auto_refresh:
-        tab.refresh()
+        tab.start_auto_refresh(immediate=True)
     tab.root._printer_tab_controller = tab  # type: ignore[attr-defined]
     return tab.root

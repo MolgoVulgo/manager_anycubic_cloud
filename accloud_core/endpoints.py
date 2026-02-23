@@ -34,6 +34,7 @@ ENDPOINTS: dict[str, Endpoint] = {
     "print_order": Endpoint(method="POST", path="/p/p/workbench/api/work/operation/sendOrder"),
     "printers": Endpoint(method="GET", path="/p/p/workbench/api/work/printer/getPrinters"),
     "printer_info": Endpoint(method="POST", path="/p/p/workbench/api/work/printer/Info"),
+    "projects": Endpoint(method="GET", path="/p/p/workbench/api/work/project/getProjects"),
 }
 
 

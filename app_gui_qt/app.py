@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 import faulthandler
+import json
 import logging
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
@@ -307,12 +308,289 @@ def _make_refresh_printers_callback(
                 return cached_printers, "Cloud unavailable, loaded printers from local cache."
             return [], f"Printers refresh failed: {exc}"
 
+        _enrich_printers_with_active_projects(
+            printers=printers,
+            api=api,
+            logger=logger,
+        )
         _save_printer_snapshot(cache_store=cache_store, printers=printers)
         if printers:
             return printers, None
         return printers, "No printer returned by cloud API."
 
     return _refresh
+
+
+def _enrich_printers_with_active_projects(
+    *,
+    printers: list[Printer],
+    api: AnycubicCloudApi,
+    logger: logging.Logger,
+) -> None:
+    candidates = [
+        item
+        for item in printers
+        if item.printer_id and (item.online or (item.is_printing is not None and item.is_printing > 0))
+    ]
+    if not candidates:
+        return
+
+    workers = max(1, min(4, len(candidates)))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="printer-projects") as pool:
+        futures = {
+            pool.submit(
+                api.list_projects,
+                printer_id=printer.printer_id,
+                print_status=1,
+                page=1,
+                limit=1,
+            ): printer
+            for printer in candidates
+        }
+        for future in as_completed(futures):
+            printer = futures[future]
+            try:
+                projects = future.result()
+            except Exception as exc:
+                logger.debug(
+                    "Printer projects fetch failed printer_id=%s name=%s error=%s",
+                    printer.printer_id,
+                    printer.name,
+                    exc,
+                )
+                continue
+
+            if not projects:
+                try:
+                    projects = api.list_projects(
+                        printer_id=printer.printer_id,
+                        print_status=None,
+                        page=1,
+                        limit=5,
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "Printer projects fallback fetch failed printer_id=%s name=%s error=%s",
+                        printer.printer_id,
+                        printer.name,
+                        exc,
+                    )
+                    continue
+            if not projects:
+                continue
+
+            active_project = _select_active_project(projects)
+            if active_project is None:
+                continue
+            _apply_active_project_to_printer(printer=printer, project=active_project)
+
+
+def _select_active_project(projects: list[dict[str, object]]) -> dict[str, object] | None:
+    if not projects:
+        return None
+    for project in projects:
+        if _is_active_project(project):
+            return project
+    return projects[0]
+
+
+def _is_active_project(project: dict[str, object]) -> bool:
+    status = _to_optional_int(project.get("print_status"))
+    if status is not None:
+        if status == 1:
+            return True
+        if status in {0, 2}:
+            return False
+
+    settings = _parse_json_map(project.get("settings"))
+    device_message = _parse_json_map(project.get("device_message"))
+    state = _to_optional_str(
+        _pick_map_value(
+            device_message,
+            "state",
+            default=_pick_map_value(settings, "state", default=project.get("state")),
+        )
+    )
+    if state and state.lower() in {"printing", "paused", "pause", "heating", "resuming", "starting", "busy"}:
+        return True
+
+    progress = _to_optional_int(
+        _pick_map_value(
+            device_message,
+            "progress",
+            default=_pick_map_value(settings, "progress", default=project.get("progress")),
+        )
+    )
+    if progress is not None and 0 < progress < 100:
+        return True
+
+    remain_time = _to_optional_int(
+        _pick_map_value(
+            device_message,
+            "remain_time",
+            default=_pick_map_value(settings, "remain_time", default=project.get("remain_time")),
+        )
+    )
+    if remain_time is not None and remain_time > 0:
+        return True
+
+    return False
+
+
+def _apply_active_project_to_printer(*, printer: Printer, project: dict[str, object]) -> None:
+    settings = _parse_json_map(project.get("settings"))
+    device_message = _parse_json_map(project.get("device_message"))
+    slice_param = _parse_json_map(project.get("slice_param"))
+
+    printer.current_file_name = _to_optional_str(
+        _pick_map_value(
+            device_message,
+            "filename",
+            "file_name",
+            default=_pick_map_value(
+                settings,
+                "filename",
+                "file_name",
+                default=_pick_map_value(project, "gcode_name", "name", "filename", "old_filename"),
+            ),
+        )
+    )
+
+    progress = _to_optional_int(
+        _pick_map_value(
+            device_message,
+            "progress",
+            default=_pick_map_value(settings, "progress", default=project.get("progress")),
+        )
+    )
+    if progress is not None:
+        progress = max(0, min(progress, 100))
+    printer.progress_percent = progress
+
+    remain_time = _to_optional_int(
+        _pick_map_value(
+            device_message,
+            "remain_time",
+            default=_pick_map_value(settings, "remain_time", default=project.get("remain_time")),
+        )
+    )
+    if remain_time is not None and remain_time < 0:
+        remain_time = None
+    printer.remain_time_min = remain_time
+
+    printer.elapsed_time_min = _resolve_project_elapsed_minutes(
+        project=project,
+        settings=settings,
+        device_message=device_message,
+    )
+    printer.current_layer = _to_optional_int(
+        _pick_map_value(
+            device_message,
+            "curr_layer",
+            "current_layer",
+            default=_pick_map_value(
+                settings,
+                "curr_layer",
+                "current_layer",
+                default=_pick_map_value(project, "curr_layer", "current_layer"),
+            ),
+        )
+    )
+    printer.total_layers = _to_optional_int(
+        _pick_map_value(
+            device_message,
+            "total_layers",
+            default=_pick_map_value(
+                settings,
+                "total_layers",
+                default=_pick_map_value(project, "total_layers", default=slice_param.get("layers")),
+            ),
+        )
+    )
+    printer.task_id = _to_optional_str(
+        _pick_map_value(
+            device_message,
+            "taskid",
+            "task_id",
+            default=_pick_map_value(settings, "taskid", "task_id", default=_pick_map_value(project, "taskid", "task_id", "id")),
+        )
+    )
+    printer.print_status = _to_optional_int(project.get("print_status"))
+
+    state = _to_optional_str(
+        _pick_map_value(
+            device_message,
+            "state",
+            default=_pick_map_value(settings, "state", default=project.get("state")),
+        )
+    )
+    if state:
+        printer.state = state
+    elif not printer.state or printer.state in {"online", "queued"}:
+        printer.state = "printing"
+    if printer.is_printing is None or printer.is_printing <= 0:
+        printer.is_printing = 1
+
+
+def _resolve_project_elapsed_minutes(
+    *,
+    project: dict[str, object],
+    settings: dict[str, object],
+    device_message: dict[str, object],
+) -> int | None:
+    elapsed = _to_optional_int(
+        _pick_map_value(
+            device_message,
+            "print_time",
+            default=_pick_map_value(settings, "print_time", default=project.get("print_time")),
+        )
+    )
+    if elapsed is not None:
+        return max(elapsed, 0)
+
+    start_time = _to_optional_int(project.get("start_time"))
+    last_update = _to_optional_int(project.get("last_update_time"))
+    if start_time is None or last_update is None:
+        return None
+    if last_update > 10_000_000_000:
+        last_update = int(last_update / 1000)
+    if last_update < start_time:
+        return None
+    return int((last_update - start_time) / 60)
+
+
+def _clear_active_project_fields(printer: Printer) -> None:
+    printer.current_file_name = None
+    printer.progress_percent = None
+    printer.remain_time_min = None
+    printer.elapsed_time_min = None
+    printer.current_layer = None
+    printer.total_layers = None
+    printer.task_id = None
+    printer.print_status = None
+
+
+def _parse_json_map(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _pick_map_value(mapping: dict[str, object], *keys: str, default: object = None) -> object:
+    for key in keys:
+        if key in mapping and mapping[key] is not None:
+            return mapping[key]
+    return default
 
 
 def _make_download_file_callback(*, api: AnycubicCloudApi, logger: logging.Logger):
@@ -328,6 +606,25 @@ def _make_download_file_callback(*, api: AnycubicCloudApi, logger: logging.Logge
         api.download_file(file_id, destination)
 
     return _download
+
+
+def _make_delete_file_callback(*, api: AnycubicCloudApi, logger: logging.Logger):
+    def _delete(file_item: FileItem) -> None:
+        file_id = str(file_item.file_id).strip()
+        if not file_id:
+            raise ValueError("Cannot delete file without file_id.")
+        logger.info(
+            "Cloud delete requested file_id=%s file_name=%s",
+            file_id,
+            file_item.name,
+        )
+        api.delete_file(file_id)
+        logger.info(
+            "Cloud delete completed file_id=%s",
+            file_id,
+        )
+
+    return _delete
 
 
 def _make_upload_file_callback(*, api: AnycubicCloudApi, logger: logging.Logger):
@@ -346,6 +643,33 @@ def _make_upload_file_callback(*, api: AnycubicCloudApi, logger: logging.Logger)
         return file_id
 
     return _upload
+
+
+def _make_print_file_callback(*, api: AnycubicCloudApi, logger: logging.Logger):
+    def _print(file_item: FileItem, printer: Printer) -> None:
+        file_id = str(file_item.file_id).strip()
+        if not file_id:
+            raise ValueError("Cannot send print order without file_id.")
+
+        printer_id = str(printer.printer_id).strip()
+        if not printer_id:
+            raise ValueError("Cannot send print order without printer_id.")
+
+        logger.info(
+            "Cloud print requested file_id=%s printer_id=%s printer_name=%s file_name=%s",
+            file_id,
+            printer_id,
+            printer.name,
+            file_item.name,
+        )
+        api.send_print_order(file_id, printer_id)
+        logger.info(
+            "Cloud print order sent file_id=%s printer_id=%s",
+            file_id,
+            printer_id,
+        )
+
+    return _print
 
 
 def _extract_layer_thickness_mm(extra: dict[str, object]) -> float | None:
@@ -565,9 +889,18 @@ def _deserialize_printers(raw: object) -> list[Printer]:
                 material_type=_to_optional_str(item.get("material_type")),
                 material_used=_to_optional_str(item.get("material_used")),
                 print_total_time=_to_optional_str(item.get("print_total_time")),
+                print_count=_to_optional_int(item.get("print_count")),
                 image_url=_to_optional_str(item.get("image_url")),
                 machine_type=_to_optional_int(item.get("machine_type")),
                 key=_to_optional_str(item.get("key")),
+                current_file_name=_to_optional_str(item.get("current_file_name")),
+                progress_percent=_to_optional_int(item.get("progress_percent")),
+                remain_time_min=_to_optional_int(item.get("remain_time_min")),
+                elapsed_time_min=_to_optional_int(item.get("elapsed_time_min")),
+                current_layer=_to_optional_int(item.get("current_layer")),
+                total_layers=_to_optional_int(item.get("total_layers")),
+                task_id=_to_optional_str(item.get("task_id")),
+                print_status=_to_optional_int(item.get("print_status")),
             )
         )
     return output
@@ -808,7 +1141,15 @@ def build_main_window(
         api=api,
         logger=logger,
     )
+    delete_cb = _make_delete_file_callback(
+        api=api,
+        logger=logger,
+    )
     upload_cb = _make_upload_file_callback(
+        api=api,
+        logger=logger,
+    )
+    print_cb = _make_print_file_callback(
         api=api,
         logger=logger,
     )
@@ -872,6 +1213,9 @@ def build_main_window(
         on_open_viewer=lambda: _open_viewer_dialog(window),
         on_upload=upload_cb,
         on_download=download_cb,
+        on_delete=delete_cb,
+        on_list_printers=refresh_printers_cb,
+        on_print=print_cb,
         on_refresh=refresh_cb,
         auto_refresh=False,
         cache_store=cache_store,
@@ -885,7 +1229,8 @@ def build_main_window(
         window,
         on_open_print_dialog=lambda _printer=None: _open_print_dialog(window),
         on_refresh=refresh_printers_cb,
-        auto_refresh=False,
+        auto_refresh=True,
+        auto_refresh_interval_ms=30_000,
     )
     tabs.addTab(printer_widget, "Printer")
     tabs.addTab(build_log_tab(window, log_path=config.http_log_path), "Log")

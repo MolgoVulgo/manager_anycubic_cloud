@@ -11,7 +11,11 @@ Documenter de facon exhaustive tous les boutons lies a l'onglet `Files` et leur 
 - Session cloud active (ou cache local disponible).
 - `build_files_tab(...)` avec callbacks potentiels:
   - `on_refresh`
+  - `on_upload`
   - `on_download`
+  - `on_delete`
+  - `on_list_printers`
+  - `on_print`
   - `on_open_viewer`
 - Liste `FileItem` issue du refresh.
 
@@ -26,8 +30,7 @@ Documenter de facon exhaustive tous les boutons lies a l'onglet `Files` et leur 
 ### Etat general de l'onglet
 1. **Nature de l'onglet**
 - Onglet fonctionnel cote UI.
-- Actions reellement branchees: `Refresh`, `Upload .pwmb`, `Details`, `Download`.
-- Actions encore en stub: `Delete`, `Print`.
+- Actions reellement branchees: `Refresh`, `Upload .pwmb`, `Delete`, `Details`, `Print`, `Download`.
 - Action conditionnelle: `Open 3D Viewer` (visible uniquement pour les fichiers `.pwmb`).
 
 2. **Chargement initial (hors clic utilisateur)**
@@ -39,9 +42,9 @@ Documenter de facon exhaustive tous les boutons lies a l'onglet `Files` et leur 
 |---|---|---|---|---|
 | `Refresh` | Toolbar onglet | Actif | Oui (via callback) | Desactive pendant chargement |
 | `Upload .pwmb` | Toolbar onglet | Actif | Oui (via callback) | 1 upload simultane max, refresh auto apres succes |
-| `Delete` | Carte fichier (haut droite) | Stub UI | Non | Popup `Design only` |
+| `Delete` | Carte fichier (haut droite) | Actif | Oui (via callback) | Confirmation + suppression + refresh |
 | `Details` | Carte fichier (actions) | Actif | Non (local) | Ouvre `File Details` read-only |
-| `Print` | Carte fichier (actions) | Stub UI | Non | Popup `Design only` |
+| `Print` | Carte fichier (actions) | Actif | Oui (via callbacks) | Selection imprimante + `sendOrder` |
 | `Download` | Carte fichier (actions) | Actif | Oui (via callback) | 1 download simultane max |
 | `Open 3D Viewer` | Carte fichier (actions) | Actif conditionnel | Non cloud | Affiche seulement pour `.pwmb` |
 
@@ -104,11 +107,27 @@ Documenter de facon exhaustive tous les boutons lies a l'onglet `Files` et leur 
 ### Boutons des cartes fichier
 1. **`Delete`**
 - Emplacement: coin haut droit de la carte.
-- Etat: **stub UI**.
-- Implementation:
-  - `connect_stub_action(delete_button, f"Delete for {file_item.name}")`.
-  - popup `Design only`.
-- Endpoint de suppression present dans le core (`delFiles`) mais non branche a ce bouton.
+- Etat: **actif**.
+- Pre-conditions et garde-fous:
+  - si `on_delete` absent: popup `No cloud delete callback configured.`.
+  - si une suppression est deja en cours (`files-delete` vivant): popup `A file deletion is already running.`.
+- Flux UI:
+  - popup de confirmation `Delete file?` (Yes/No, defaut No).
+  - si confirmation: statut `Deleting <file_name>...`.
+  - worker asynchrone + polling timer (80 ms).
+- Succes:
+  - popup `Delete complete`.
+  - statut `Deleted <file_name>. Refreshing list...`.
+  - refresh automatique via `refresh()` si callback `on_refresh` disponible.
+- Echec:
+  - popup `Delete failed`.
+  - statut `Delete failed for <file_name>: <exception>`.
+- Flux cloud (callback par defaut de l'app):
+  1. validation locale `file_id`.
+  2. appel `api.delete_file(file_id)`.
+  3. endpoint cloud: `POST /p/p/workbench/api/work/index/delFiles`.
+  4. payload tente en priorite `idArr=[<id numerique>]` quand possible, avec fallback string.
+  5. succes metier exige `code == 1` (sinon message cloud remonte en erreur).
 
 2. **`Details`**
 - Emplacement: rangee d'actions de la carte.
@@ -125,11 +144,36 @@ Documenter de facon exhaustive tous les boutons lies a l'onglet `Files` et leur 
 
 3. **`Print`**
 - Emplacement: rangee d'actions de la carte.
-- Etat: **stub UI**.
-- Implementation:
-  - `connect_stub_action(print_button, f"Print for {file_item.name}")`.
-  - popup `Design only`.
-- Endpoint `sendOrder` existe dans le core mais non branche a ce bouton.
+- Etat: **actif**.
+- Pre-conditions et garde-fous:
+  - si `on_print` absent: popup `No cloud print callback configured.`.
+  - si `on_list_printers` absent: popup `No cloud printer list callback configured.`.
+  - si chargement imprimantes deja en cours: popup `Printer list is already loading.`.
+  - si envoi print deja en cours: popup `A print request is already running.`.
+- Flux UI:
+  - au clic: statut `Loading printers for <file_name>...`.
+  - worker asynchrone qui appelle `on_list_printers()`.
+  - popup de selection (`QInputDialog`) avec la liste des imprimantes:
+    - priorite aux imprimantes online (`online=True`),
+    - fallback sur toutes les imprimantes si aucune online.
+  - si annulation de la selection: statut `Print cancelled.`.
+  - si confirmation: statut `Sending print order for <file_name> to <printer_name>...`.
+  - worker asynchrone d'envoi print (`on_print(file_item, printer)`).
+- Succes:
+  - statut `Print order sent for <file_name> on <printer_name>.`
+  - popup `Print order sent`.
+- Echec:
+  - chargement imprimantes: popup `Print failed` + message `Could not load printers: ...`
+  - envoi ordre: popup `Print failed` + message `Print failed for <file_name> on <printer_name>: ...`
+- Flux cloud (wiring standard dans `app.py`):
+  1. `on_list_printers` reutilise le callback de refresh imprimantes (`api.list_printers()` + fallback cache local).
+  2. `on_print` valide `file_id` et `printer_id`.
+  3. appel `api.send_print_order(file_id, printer_id)` avec priorite au payload legacy observe comme le plus compatible:
+     - form-data: `printer_id`, `project_id=0`, `order_id=1`, `is_delete_file=0`,
+     - champ `data` JSON stringifie: `{"file_id":"...","matrix":"","filetype":0,"project_type":1,"template_id":-2074360784}`.
+  4. fallback automatique vers payload JSON (legacy puis minimal) si rejet du payload precedent.
+  5. validation du code metier Anycubic (`code == 1`), sinon remontée du message cloud (`msg`/`message`) vers popup `Print failed`.
+  6. endpoint cloud: `POST /p/p/workbench/api/work/operation/sendOrder`.
 
 4. **`Download`**
 - Emplacement: rangee d'actions de la carte.
@@ -220,8 +264,8 @@ Documenter de facon exhaustive tous les boutons lies a l'onglet `Files` et leur 
 
 ### Contrats d'usage recommandes
 1. Garder `Refresh` comme point d'entree unique de synchro cloud (avec fallback cache deja en place).
-2. Brancher `Delete` sur `api.delete_file(...)` avec confirmation explicite utilisateur.
-3. Brancher `Print` sur un vrai flux de selection imprimante + `api.send_print_order(...)`.
+2. Ajouter une suppression multiple (batch) si besoin operationnel, en reutilisant `api.delete_file(...)`/`idArr`.
+3. Etendre le flux `Print` si besoin (confirmation supplementaire, options avancees cloud, file d'attente multi-demandes).
 4. Faire evoluer `Open 3D Viewer` pour transmettre et charger le fichier clique (pas seulement ouvrir le dialog global).
 
 ### Objectif

@@ -9,7 +9,7 @@ import threading
 import httpx
 
 from accloud_core.cache_store import CacheStore
-from accloud_core.models import FileItem, Quota
+from accloud_core.models import FileItem, Printer, Quota
 from accloud_core.utils import format_bytes
 from app_gui_qt.qt_compat import require_qt
 from app_gui_qt.widgets import apply_fade_in, connect_stub_action, make_panel
@@ -18,6 +18,9 @@ from app_gui_qt.widgets import apply_fade_in, connect_stub_action, make_panel
 RefreshCallback = Callable[[], tuple[Quota | None, list[FileItem], str | None]]
 UploadCallback = Callable[[str], str]
 DownloadCallback = Callable[[FileItem, str], None]
+DeleteCallback = Callable[[FileItem], None]
+ListPrintersCallback = Callable[[], tuple[list[Printer], str | None]]
+PrintCallback = Callable[[FileItem, Printer], None]
 
 
 def _require_qt_gui():
@@ -38,6 +41,9 @@ class FilesTab:
         on_open_viewer: Callable | None = None,
         on_upload: UploadCallback | None = None,
         on_download: DownloadCallback | None = None,
+        on_delete: DeleteCallback | None = None,
+        on_list_printers: ListPrintersCallback | None = None,
+        on_print: PrintCallback | None = None,
         on_refresh: RefreshCallback | None = None,
         cache_store: CacheStore | None = None,
         thumbnail_ttl_s: int = 0,
@@ -49,6 +55,9 @@ class FilesTab:
         self._on_open_viewer = on_open_viewer
         self._on_upload = on_upload
         self._on_download = on_download
+        self._on_delete = on_delete
+        self._on_list_printers = on_list_printers
+        self._on_print = on_print
         self._on_refresh = on_refresh
         self._cache_store = cache_store
         self._thumbnail_ttl_s = max(0, int(thumbnail_ttl_s))
@@ -68,6 +77,15 @@ class FilesTab:
         self._download_timer: object | None = None
         self._download_thread: threading.Thread | None = None
         self._download_result: dict[str, object] = {}
+        self._delete_timer: object | None = None
+        self._delete_thread: threading.Thread | None = None
+        self._delete_result: dict[str, object] = {}
+        self._print_list_timer: object | None = None
+        self._print_list_thread: threading.Thread | None = None
+        self._print_list_result: dict[str, object] = {}
+        self._print_submit_timer: object | None = None
+        self._print_submit_thread: threading.Thread | None = None
+        self._print_submit_result: dict[str, object] = {}
 
         self.root = qtwidgets.QWidget(parent)
         self.root.setObjectName("tabRoot")
@@ -410,7 +428,9 @@ class FilesTab:
 
         delete_button = qtwidgets.QPushButton("Delete")
         delete_button.setObjectName("danger")
-        connect_stub_action(delete_button, f"Delete for {file_item.name}")
+        delete_button.clicked.connect(
+            lambda _checked=False, item=file_item: self._start_delete(item)
+        )
         top.addWidget(delete_button, 0)
         right_layout.addLayout(top)
 
@@ -458,7 +478,9 @@ class FilesTab:
         actions.addWidget(details_button)
 
         print_button = qtwidgets.QPushButton("Print")
-        connect_stub_action(print_button, f"Print for {file_item.name}")
+        print_button.clicked.connect(
+            lambda _checked=False, item=file_item: self._start_print(item)
+        )
         actions.addWidget(print_button)
 
         download_button = qtwidgets.QPushButton("Download")
@@ -479,6 +501,315 @@ class FilesTab:
         right_layout.addLayout(actions)
         card_layout.addWidget(right, 1)
         return card
+
+    def _start_delete(self, file_item: FileItem) -> None:
+        qtwidgets = self._qtwidgets
+        callback = self._on_delete
+        if callback is None:
+            qtwidgets.QMessageBox.information(
+                self.root,
+                "Delete",
+                "No cloud delete callback configured.",
+            )
+            return
+
+        if self._delete_thread is not None and self._delete_thread.is_alive():
+            qtwidgets.QMessageBox.information(
+                self.root,
+                "Delete in progress",
+                "A file deletion is already running.",
+            )
+            return
+
+        file_name = file_item.name or file_item.file_id or "file"
+        answer = qtwidgets.QMessageBox.question(
+            self.root,
+            "Delete file?",
+            f"Delete this cloud file?\n\n{file_name}\n(id={file_item.file_id})",
+            qtwidgets.QMessageBox.StandardButton.Yes | qtwidgets.QMessageBox.StandardButton.No,
+            qtwidgets.QMessageBox.StandardButton.No,
+        )
+        if answer != qtwidgets.QMessageBox.StandardButton.Yes:
+            return
+
+        self._status_label.setText(f"Deleting {file_name}...")
+        self._delete_result = {
+            "file_item": file_item,
+            "file_name": file_name,
+            "file_id": file_item.file_id,
+        }
+
+        def _worker() -> None:
+            try:
+                callback(file_item)
+            except Exception as exc:
+                self._logger.exception(
+                    "Delete worker failed file_id=%s name=%s",
+                    file_item.file_id,
+                    file_item.name,
+                )
+                self._delete_result["exception"] = str(exc)
+
+        self._delete_thread = threading.Thread(target=_worker, daemon=True, name="files-delete")
+        self._delete_thread.start()
+
+        timer = self._qtcore.QTimer(self.root)
+        timer.setInterval(80)
+        timer.timeout.connect(self._poll_delete_result)
+        timer.start()
+        self._delete_timer = timer
+
+    def _poll_delete_result(self) -> None:
+        if self._delete_thread is not None and self._delete_thread.is_alive():
+            return
+
+        if self._delete_timer is not None:
+            self._delete_timer.stop()
+            self._delete_timer = None
+
+        result = dict(self._delete_result)
+        self._delete_thread = None
+        self._delete_result = {}
+        qtwidgets = self._qtwidgets
+
+        file_name = str(result.get("file_name") or "file")
+        file_id = str(result.get("file_id") or "").strip()
+        exception = result.get("exception")
+
+        if isinstance(exception, str) and exception.strip():
+            message = f"Delete failed for {file_name}: {exception}"
+            self._logger.error(message)
+            self._status_label.setText(message)
+            qtwidgets.QMessageBox.warning(self.root, "Delete failed", message)
+            return
+
+        self._status_label.setText(f"Deleted {file_name}. Refreshing list...")
+        qtwidgets.QMessageBox.information(
+            self.root,
+            "Delete complete",
+            f"{file_name} deleted from cloud.",
+        )
+
+        if self._on_refresh is not None:
+            self.refresh()
+            return
+
+        if file_id:
+            remaining = [item for item in self._files if str(item.file_id).strip() != file_id]
+            self.render_files(remaining)
+
+    def _start_print(self, file_item: FileItem) -> None:
+        qtwidgets = self._qtwidgets
+        list_printers_cb = self._on_list_printers
+        print_cb = self._on_print
+
+        if print_cb is None:
+            qtwidgets.QMessageBox.information(
+                self.root,
+                "Print",
+                "No cloud print callback configured.",
+            )
+            return
+
+        if list_printers_cb is None:
+            qtwidgets.QMessageBox.information(
+                self.root,
+                "Print",
+                "No cloud printer list callback configured.",
+            )
+            return
+
+        if self._print_list_thread is not None and self._print_list_thread.is_alive():
+            qtwidgets.QMessageBox.information(
+                self.root,
+                "Print in progress",
+                "Printer list is already loading.",
+            )
+            return
+
+        if self._print_submit_thread is not None and self._print_submit_thread.is_alive():
+            qtwidgets.QMessageBox.information(
+                self.root,
+                "Print in progress",
+                "A print request is already running.",
+            )
+            return
+
+        file_name = file_item.name or file_item.file_id or "file"
+        self._status_label.setText(f"Loading printers for {file_name}...")
+        self._print_list_result = {
+            "file_item": file_item,
+        }
+
+        def _worker() -> None:
+            try:
+                printers, error_message = list_printers_cb()
+                self._print_list_result["printers"] = printers
+                self._print_list_result["error_message"] = error_message
+            except Exception as exc:
+                self._logger.exception(
+                    "Print list-printers worker failed file_id=%s name=%s",
+                    file_item.file_id,
+                    file_item.name,
+                )
+                self._print_list_result["exception"] = str(exc)
+
+        self._print_list_thread = threading.Thread(target=_worker, daemon=True, name="files-print-list")
+        self._print_list_thread.start()
+
+        timer = self._qtcore.QTimer(self.root)
+        timer.setInterval(70)
+        timer.timeout.connect(self._poll_print_list_result)
+        timer.start()
+        self._print_list_timer = timer
+
+    def _poll_print_list_result(self) -> None:
+        if self._print_list_thread is not None and self._print_list_thread.is_alive():
+            return
+
+        if self._print_list_timer is not None:
+            self._print_list_timer.stop()
+            self._print_list_timer = None
+
+        result = dict(self._print_list_result)
+        self._print_list_thread = None
+        self._print_list_result = {}
+        qtwidgets = self._qtwidgets
+
+        exception = result.get("exception")
+        if isinstance(exception, str) and exception.strip():
+            message = f"Could not load printers: {exception}"
+            self._logger.error(message)
+            self._status_label.setText(message)
+            qtwidgets.QMessageBox.warning(self.root, "Print failed", message)
+            return
+
+        file_item = result.get("file_item")
+        if not isinstance(file_item, FileItem):
+            self._status_label.setText("Print failed: invalid file context.")
+            qtwidgets.QMessageBox.warning(self.root, "Print failed", "Invalid file context.")
+            return
+
+        raw_printers = result.get("printers")
+        printers = [item for item in raw_printers if isinstance(item, Printer)] if isinstance(raw_printers, list) else []
+        error_message = result.get("error_message")
+
+        if isinstance(error_message, str) and error_message:
+            self._status_label.setText(error_message)
+
+        if not printers:
+            message = "No printer available for print order."
+            self._status_label.setText(message)
+            qtwidgets.QMessageBox.warning(self.root, "Print failed", message)
+            return
+
+        target = self._choose_target_printer(file_item, printers)
+        if target is None:
+            self._status_label.setText("Print cancelled.")
+            return
+        self._start_print_submit(file_item, target)
+
+    def _choose_target_printer(self, file_item: FileItem, printers: list[Printer]) -> Printer | None:
+        qtwidgets = self._qtwidgets
+        online = [item for item in printers if item.online]
+        candidates = online if online else printers
+        labels = [_format_printer_choice(item) for item in candidates]
+        prompt = (
+            f"Select target printer for {file_item.name or file_item.file_id}:"
+            if online
+            else (
+                "No online printer detected.\n"
+                f"Select target printer for {file_item.name or file_item.file_id}:"
+            )
+        )
+        selected_label, accepted = qtwidgets.QInputDialog.getItem(
+            self.root,
+            "Print",
+            prompt,
+            labels,
+            0,
+            False,
+        )
+        if not accepted:
+            return None
+        for printer, label in zip(candidates, labels):
+            if label == selected_label:
+                return printer
+        return candidates[0] if candidates else None
+
+    def _start_print_submit(self, file_item: FileItem, printer: Printer) -> None:
+        qtwidgets = self._qtwidgets
+        callback = self._on_print
+        if callback is None:
+            qtwidgets.QMessageBox.information(
+                self.root,
+                "Print",
+                "No cloud print callback configured.",
+            )
+            return
+
+        file_name = file_item.name or file_item.file_id or "file"
+        printer_label = printer.name or printer.printer_id
+        self._status_label.setText(f"Sending print order for {file_name} to {printer_label}...")
+        self._print_submit_result = {
+            "file_item": file_item,
+            "printer": printer,
+        }
+
+        def _worker() -> None:
+            try:
+                callback(file_item, printer)
+            except Exception as exc:
+                self._logger.exception(
+                    "Print submit worker failed file_id=%s name=%s printer_id=%s",
+                    file_item.file_id,
+                    file_item.name,
+                    printer.printer_id,
+                )
+                self._print_submit_result["exception"] = str(exc)
+
+        self._print_submit_thread = threading.Thread(target=_worker, daemon=True, name="files-print-submit")
+        self._print_submit_thread.start()
+
+        timer = self._qtcore.QTimer(self.root)
+        timer.setInterval(80)
+        timer.timeout.connect(self._poll_print_submit_result)
+        timer.start()
+        self._print_submit_timer = timer
+
+    def _poll_print_submit_result(self) -> None:
+        if self._print_submit_thread is not None and self._print_submit_thread.is_alive():
+            return
+
+        if self._print_submit_timer is not None:
+            self._print_submit_timer.stop()
+            self._print_submit_timer = None
+
+        result = dict(self._print_submit_result)
+        self._print_submit_thread = None
+        self._print_submit_result = {}
+        qtwidgets = self._qtwidgets
+
+        file_item = result.get("file_item")
+        printer = result.get("printer")
+        file_name = file_item.name if isinstance(file_item, FileItem) else "file"
+        printer_name = printer.name if isinstance(printer, Printer) else "printer"
+
+        exception = result.get("exception")
+        if isinstance(exception, str) and exception.strip():
+            message = f"Print failed for {file_name} on {printer_name}: {exception}"
+            self._logger.error(message)
+            self._status_label.setText(message)
+            qtwidgets.QMessageBox.warning(self.root, "Print failed", message)
+            return
+
+        message = f"Print order sent for {file_name} on {printer_name}."
+        self._status_label.setText(message)
+        qtwidgets.QMessageBox.information(
+            self.root,
+            "Print order sent",
+            message,
+        )
 
     def _start_download(self, file_item: FileItem) -> None:
         qtwidgets = self._qtwidgets
@@ -882,6 +1213,12 @@ def _sanitize_filename(value: str | None) -> str:
     return cleaned
 
 
+def _format_printer_choice(printer: Printer) -> str:
+    status = "online" if printer.online else "offline"
+    state = printer.state or "-"
+    return f"{printer.name} [{printer.printer_id}] | {status} | state={state}"
+
+
 def _normalize_extension(value: str | None) -> str | None:
     if value is None:
         return None
@@ -899,6 +1236,9 @@ def build_files_tab(
     on_open_viewer=None,
     on_upload: UploadCallback | None = None,
     on_download: DownloadCallback | None = None,
+    on_delete: DeleteCallback | None = None,
+    on_list_printers: ListPrintersCallback | None = None,
+    on_print: PrintCallback | None = None,
     on_refresh: RefreshCallback | None = None,
     auto_refresh: bool = False,
     cache_store: CacheStore | None = None,
@@ -909,6 +1249,9 @@ def build_files_tab(
         on_open_viewer=on_open_viewer,
         on_upload=on_upload,
         on_download=on_download,
+        on_delete=on_delete,
+        on_list_printers=on_list_printers,
+        on_print=on_print,
         on_refresh=on_refresh,
         cache_store=cache_store,
         thumbnail_ttl_s=thumbnail_ttl_s,

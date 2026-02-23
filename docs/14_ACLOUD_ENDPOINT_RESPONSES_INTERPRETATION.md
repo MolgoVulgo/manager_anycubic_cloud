@@ -81,11 +81,24 @@ Exemple : `GET /p/p/workbench/api/v3/public/getoauthToken`
 
 8. **`POST /p/p/workbench/api/work/index/delFiles`**
 - Attendu: `200/201/202` + `code=1`.
+- Requête recommandée: `idArr` avec priorité à l’ID numérique (`int`) si possible, fallback string.
 - Interprétation: suppression acceptée (immédiate ou asynchrone).
+- Si `code!=1` malgré HTTP 2xx: erreur métier (ne pas considérer comme succès).
 
 9. **`POST /work/operation/sendOrder`**
-- Attendu: `200/201/202` + payload de confirmation éventuel.
-- Interprétation: ordre d’impression soumis, suivi via endpoints projet/printer.
+- Attendu: `200/201/202` **et** `code=1`.
+- Payload recommandé (compatibilité observée):
+  - tentative 1 (prioritaire): `application/x-www-form-urlencoded` avec
+    - `printer_id`,
+    - `project_id=0`,
+    - `order_id=1`,
+    - `is_delete_file=0`,
+    - `data` JSON stringifié: `{"file_id":"...","matrix":"","filetype":0,"project_type":1,"template_id":-2074360784}`.
+  - fallback: payload JSON legacy puis payload JSON minimal (`file_id`, `printer_id`).
+- Interprétation:
+  - `code=1`: ordre d’impression soumis.
+  - `code!=1`: erreur métier (ne pas considérer comme succès même si HTTP 200), remonter `msg`/`message`.
+  - suivi via endpoints projet/printer.
 
 10. **`GET /work/printer/getPrinters`**
 - Attendu: liste imprimantes.
