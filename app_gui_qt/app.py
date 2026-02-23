@@ -133,9 +133,102 @@ def _open_print_dialog(owner) -> None:
     dialog.exec()
 
 
-def _open_viewer_dialog(owner) -> None:
-    dialog = build_pwmb3d_dialog(owner)
+def _open_viewer_dialog(
+    owner,
+    *,
+    pwmb_path: Path | None = None,
+    file_label: str | None = None,
+) -> None:
+    dialog = build_pwmb3d_dialog(
+        owner,
+        pwmb_path=pwmb_path,
+        file_label=file_label,
+    )
     dialog.exec()
+
+
+def _sanitize_filename(value: str, *, default: str = "model.pwmb") -> str:
+    text = value.strip()
+    if not text:
+        return default
+    allowed = []
+    for char in text:
+        if char.isalnum() or char in {".", "_", "-"}:
+            allowed.append(char)
+        else:
+            allowed.append("_")
+    candidate = "".join(allowed).strip("._")
+    if not candidate:
+        candidate = default
+    if not candidate.lower().endswith(".pwmb"):
+        candidate = f"{candidate}.pwmb"
+    return candidate
+
+
+def _resolve_pwmb_path_for_viewer(
+    *,
+    file_item: FileItem,
+    api: AnycubicCloudApi,
+    config: AppConfig,
+    logger: logging.Logger,
+) -> Path | None:
+    file_id = str(file_item.file_id).strip()
+    if not file_id:
+        return None
+
+    file_name = _sanitize_filename(file_item.name or file_id)
+    cache_dir = config.cache_dir / "viewer_pwmb"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / f"{file_id}_{file_name}"
+    if target.exists() and target.stat().st_size > 0:
+        return target
+
+    try:
+        api.download_file(file_id, str(target))
+    except Exception as exc:
+        try:
+            if target.exists():
+                target.unlink()
+        except OSError:
+            pass
+        logger.warning(
+            "PWMB viewer cache download failed file_id=%s name=%s error=%s",
+            file_id,
+            file_item.name,
+            exc,
+        )
+        return None
+    if target.exists() and target.stat().st_size > 0:
+        return target
+    return None
+
+
+def _make_open_viewer_callback(
+    *,
+    owner,
+    api: AnycubicCloudApi,
+    config: AppConfig,
+    logger: logging.Logger,
+):
+    def _open(file_item: FileItem | None = None) -> None:
+        pwmb_path: Path | None = None
+        file_label: str | None = None
+        if isinstance(file_item, FileItem):
+            file_label = file_item.name or file_item.file_id
+            if (file_item.name or "").lower().endswith(".pwmb"):
+                pwmb_path = _resolve_pwmb_path_for_viewer(
+                    file_item=file_item,
+                    api=api,
+                    config=config,
+                    logger=logger,
+                )
+        _open_viewer_dialog(
+            owner,
+            pwmb_path=pwmb_path,
+            file_label=file_label,
+        )
+
+    return _open
 
 
 def _make_session_import_callback(
@@ -1159,6 +1252,12 @@ def build_main_window(
     window.setWindowTitle("Anycubic Cloud Client + PWMB Viewer (Phase 3 - Cloud)")
     window.resize(1320, 860)
     window.setMinimumSize(760, 420)
+    open_viewer_cb = _make_open_viewer_callback(
+        owner=window,
+        api=api,
+        config=config,
+        logger=logger,
+    )
 
     root = qtwidgets.QWidget(window)
     root_layout = qtwidgets.QVBoxLayout(root)
@@ -1191,7 +1290,7 @@ def build_main_window(
     print_btn.clicked.connect(lambda: _open_print_dialog(window))
 
     view_btn = qtwidgets.QPushButton("3D Viewer Dialog")
-    view_btn.clicked.connect(lambda: _open_viewer_dialog(window))
+    view_btn.clicked.connect(lambda: open_viewer_cb())
 
     session_btn = qtwidgets.QPushButton("Session Settings")
     session_btn.clicked.connect(
@@ -1210,7 +1309,7 @@ def build_main_window(
     tabs = qtwidgets.QTabWidget(root)
     files_widget = build_files_tab(
         window,
-        on_open_viewer=lambda: _open_viewer_dialog(window),
+        on_open_viewer=open_viewer_cb,
         on_upload=upload_cb,
         on_download=download_cb,
         on_delete=delete_cb,
