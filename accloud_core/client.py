@@ -80,6 +80,7 @@ class CloudHttpClient:
         *,
         headers: Mapping[str, str] | None = None,
         expected_status: int | tuple[int, ...] | None = None,
+        include_session_headers: bool = True,
         **kwargs: Any,
     ) -> httpx.Response:
         safe_url = safe_url_for_log(url)
@@ -91,7 +92,11 @@ class CloudHttpClient:
         auth_recovery_attempted = False
 
         while attempt < max_attempts:
-            request_headers = self._build_headers(url=url, headers=headers)
+            request_headers = self._build_headers(
+                url=url,
+                headers=headers,
+                include_session_headers=include_session_headers,
+            )
             request_id = request_headers.get("X-Request-Id", "")
             safe_headers = redact_mapping(request_headers)
             self._logger.debug(
@@ -213,9 +218,15 @@ class CloudHttpClient:
             status_code=response.status_code,
         )
 
-    def _build_headers(self, *, url: str, headers: Mapping[str, str] | None = None) -> dict[str, str]:
-        merged_headers = dict(self._session_data.auth_headers())
-        if self._is_workbench_api(url):
+    def _build_headers(
+        self,
+        *,
+        url: str,
+        headers: Mapping[str, str] | None = None,
+        include_session_headers: bool = True,
+    ) -> dict[str, str]:
+        merged_headers = dict(self._session_data.auth_headers()) if include_session_headers else {}
+        if include_session_headers and self._is_workbench_api(url):
             merged_headers.update(self._build_public_headers(url=url))
         if headers:
             merged_headers.update(headers)

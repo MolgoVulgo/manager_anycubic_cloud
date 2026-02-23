@@ -48,6 +48,18 @@ def _configure_logging(config: AppConfig) -> None:
     app_file_handler.setFormatter(formatter)
     root_logger.addHandler(app_file_handler)
 
+    config.fault_log_path.parent.mkdir(parents=True, exist_ok=True)
+    fault_file_handler = TimedRotatingFileHandler(
+        filename=str(config.fault_log_path),
+        when="midnight",
+        interval=1,
+        backupCount=config.http_log_retention_days,
+        encoding="utf-8",
+    )
+    fault_file_handler.setLevel(logging.ERROR)
+    fault_file_handler.setFormatter(formatter)
+    root_logger.addHandler(fault_file_handler)
+
     http_logger = logging.getLogger("accloud_core.http")
     http_logger.setLevel(logging.DEBUG)
     # accloud_core.http records now flow through root handlers to keep a single consolidated log file.
@@ -55,6 +67,30 @@ def _configure_logging(config: AppConfig) -> None:
         http_logger.removeHandler(handler)
         handler.close()
     http_logger.propagate = True
+
+
+def _install_global_exception_hooks(logger: logging.Logger) -> None:
+    def _log_uncaught(exc_type, exc_value, exc_traceback) -> None:
+        if isinstance(exc_value, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        logger.critical(
+            "Uncaught exception",
+            exc_info=(exc_type, exc_value, exc_traceback),
+        )
+
+    def _log_thread_uncaught(args: threading.ExceptHookArgs) -> None:
+        if isinstance(args.exc_value, KeyboardInterrupt):
+            return
+        thread_name = args.thread.name if args.thread is not None else "unknown-thread"
+        logger.critical(
+            "Uncaught thread exception in %s",
+            thread_name,
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    sys.excepthook = _log_uncaught
+    threading.excepthook = _log_thread_uncaught
 
 
 def _enable_fault_handler(config: AppConfig) -> None:
@@ -277,6 +313,39 @@ def _make_refresh_printers_callback(
         return printers, "No printer returned by cloud API."
 
     return _refresh
+
+
+def _make_download_file_callback(*, api: AnycubicCloudApi, logger: logging.Logger):
+    def _download(file_item: FileItem, destination: str) -> None:
+        file_id = str(file_item.file_id).strip()
+        if not file_id:
+            raise ValueError("Cannot download file without file_id.")
+        logger.info(
+            "Cloud download requested file_id=%s destination=%s",
+            file_id,
+            destination,
+        )
+        api.download_file(file_id, destination)
+
+    return _download
+
+
+def _make_upload_file_callback(*, api: AnycubicCloudApi, logger: logging.Logger):
+    def _upload(source_path: str) -> str:
+        source = Path(source_path).expanduser()
+        logger.info(
+            "Cloud upload requested source=%s",
+            source,
+        )
+        file_id = api.upload_file(str(source))
+        logger.info(
+            "Cloud upload completed source=%s file_id=%s",
+            source,
+            file_id,
+        )
+        return file_id
+
+    return _upload
 
 
 def _extract_layer_thickness_mm(extra: dict[str, object]) -> float | None:
@@ -735,6 +804,14 @@ def build_main_window(
         config=config,
         cache_store=cache_store,
     )
+    download_cb = _make_download_file_callback(
+        api=api,
+        logger=logger,
+    )
+    upload_cb = _make_upload_file_callback(
+        api=api,
+        logger=logger,
+    )
 
     window = qtwidgets.QMainWindow()
     window.setObjectName("mainWindow")
@@ -793,6 +870,8 @@ def build_main_window(
     files_widget = build_files_tab(
         window,
         on_open_viewer=lambda: _open_viewer_dialog(window),
+        on_upload=upload_cb,
+        on_download=download_cb,
         on_refresh=refresh_cb,
         auto_refresh=False,
         cache_store=cache_store,
@@ -825,8 +904,9 @@ def main(argv: list[str] | None = None) -> int:
     config.cache_dir.mkdir(parents=True, exist_ok=True)
     cache_store = CacheStore(config.cache_dir)
     _configure_logging(config)
-    _enable_fault_handler(config)
     logger = logging.getLogger("app_gui_qt.app")
+    _install_global_exception_hooks(logger)
+    _enable_fault_handler(config)
 
     try:
         qtcore, qtwidgets = require_qt()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from uuid import UUID
 
@@ -102,6 +103,136 @@ def test_cloud_download_signed_url_flow(tmp_path: Path) -> None:
 
     assert output.exists()
     assert output.read_bytes() == b"PWMB-BINARY"
+
+
+def test_cloud_download_signed_url_string_data_flow(tmp_path: Path) -> None:
+    output = tmp_path / "downloaded-string-data.pwmb"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/p/p/workbench/api/work/index/getDowdLoadUrl":
+            assert request.method == "POST"
+            return httpx.Response(
+                200,
+                json={"code": 1, "data": "https://signed.anycubic.example/download/file-2"},
+            )
+        if request.url.host == "signed.anycubic.example" and request.url.path == "/download/file-2":
+            return httpx.Response(200, content=b"PWMB-BINARY-STRING-DATA")
+        return httpx.Response(404, json={"error": "not found"})
+
+    client = _build_client(handler=handler, tmp_path=tmp_path)
+    api = AnycubicCloudApi(client)
+    try:
+        api.download_file("file-2", str(output))
+    finally:
+        client.close()
+
+    assert output.exists()
+    assert output.read_bytes() == b"PWMB-BINARY-STRING-DATA"
+
+
+def test_cloud_download_signed_url_get_has_no_cloud_auth_headers(tmp_path: Path) -> None:
+    output = tmp_path / "downloaded-no-auth-header.pwmb"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/p/p/workbench/api/work/index/getDowdLoadUrl":
+            assert request.method == "POST"
+            assert request.headers.get("Authorization") == "Bearer DEMO-TOKEN"
+            return httpx.Response(
+                200,
+                json={"code": 1, "data": "https://signed.anycubic.example/download/file-3"},
+            )
+        if request.url.host == "signed.anycubic.example" and request.url.path == "/download/file-3":
+            if request.headers.get("Authorization"):
+                return httpx.Response(400, json={"error": "auth header must not be present on presigned URL"})
+            return httpx.Response(200, content=b"PWMB-NO-AUTH-HEADER")
+        return httpx.Response(404, json={"error": "not found"})
+
+    session = SessionData(tokens={"access_token": "DEMO-TOKEN"})
+    client = _build_client(handler=handler, tmp_path=tmp_path, session=session)
+    api = AnycubicCloudApi(client)
+    try:
+        api.download_file("file-3", str(output))
+    finally:
+        client.close()
+
+    assert output.exists()
+    assert output.read_bytes() == b"PWMB-NO-AUTH-HEADER"
+
+
+def test_cloud_download_prefers_numeric_id_payload_for_numeric_file_id(tmp_path: Path) -> None:
+    output = tmp_path / "downloaded-numeric-id.pwmb"
+    seen_download_payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/p/p/workbench/api/work/index/getDowdLoadUrl":
+            assert request.method == "POST"
+            payload = json.loads(request.content.decode("utf-8"))
+            assert isinstance(payload, dict)
+            seen_download_payloads.append(payload)
+            if isinstance(payload.get("id"), int):
+                return httpx.Response(
+                    200,
+                    json={"code": 1, "data": "https://signed.anycubic.example/download/file-4"},
+                )
+            return httpx.Response(200, json={"code": 1, "data": ""})
+        if request.url.host == "signed.anycubic.example" and request.url.path == "/download/file-4":
+            return httpx.Response(200, content=b"PWMB-NUMERIC-ID")
+        return httpx.Response(404, json={"error": "not found"})
+
+    client = _build_client(handler=handler, tmp_path=tmp_path)
+    api = AnycubicCloudApi(client)
+    try:
+        api.download_file("53095239", str(output))
+    finally:
+        client.close()
+
+    assert seen_download_payloads
+    assert isinstance(seen_download_payloads[0].get("id"), int)
+    assert output.exists()
+    assert output.read_bytes() == b"PWMB-NUMERIC-ID"
+
+
+def test_cloud_upload_signed_url_put_has_no_cloud_auth_headers(tmp_path: Path) -> None:
+    source = tmp_path / "upload.pwmb"
+    source.write_bytes(b"PWMB-UPLOAD-BINARY")
+
+    seen_put_payload: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/p/p/workbench/api/v2/cloud_storage/lockStorageSpace":
+            assert request.method == "POST"
+            assert request.headers.get("Authorization") == "Bearer DEMO-TOKEN"
+            return httpx.Response(
+                200,
+                json={"code": 1, "data": {"id": 12345, "preSignUrl": "https://signed.anycubic.example/upload/file-5"}},
+            )
+        if request.url.host == "signed.anycubic.example" and request.url.path == "/upload/file-5":
+            assert request.method == "PUT"
+            assert request.headers.get("Authorization") in {None, ""}
+            seen_put_payload.append(request.content)
+            return httpx.Response(200, content=b"")
+        if request.url.path == "/p/p/workbench/api/v2/profile/newUploadFile":
+            assert request.method == "POST"
+            payload = json.loads(request.content.decode("utf-8"))
+            assert payload["user_lock_space_id"] == 12345
+            return httpx.Response(200, json={"code": 1, "data": {"id": 987654}})
+        if request.url.path == "/p/p/workbench/api/v2/cloud_storage/unlockStorageSpace":
+            assert request.method == "POST"
+            payload = json.loads(request.content.decode("utf-8"))
+            assert payload["id"] == 12345
+            return httpx.Response(200, json={"code": 1, "data": True})
+        return httpx.Response(404, json={"error": "not found"})
+
+    session = SessionData(tokens={"access_token": "DEMO-TOKEN"})
+    client = _build_client(handler=handler, tmp_path=tmp_path, session=session)
+    api = AnycubicCloudApi(client)
+    try:
+        file_id = api.upload_file(str(source))
+    finally:
+        client.close()
+
+    assert file_id == "987654"
+    assert seen_put_payload == [b"PWMB-UPLOAD-BINARY"]
 
 
 def test_cloud_client_retries_transport_errors(tmp_path: Path, monkeypatch) -> None:

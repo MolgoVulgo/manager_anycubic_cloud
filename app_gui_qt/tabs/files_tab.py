@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import logging
+from pathlib import Path
 import queue
 import threading
 
@@ -15,6 +16,8 @@ from app_gui_qt.widgets import apply_fade_in, connect_stub_action, make_panel
 
 
 RefreshCallback = Callable[[], tuple[Quota | None, list[FileItem], str | None]]
+UploadCallback = Callable[[str], str]
+DownloadCallback = Callable[[FileItem, str], None]
 
 
 def _require_qt_gui():
@@ -33,6 +36,8 @@ class FilesTab:
         parent=None,
         *,
         on_open_viewer: Callable | None = None,
+        on_upload: UploadCallback | None = None,
+        on_download: DownloadCallback | None = None,
         on_refresh: RefreshCallback | None = None,
         cache_store: CacheStore | None = None,
         thumbnail_ttl_s: int = 0,
@@ -42,6 +47,8 @@ class FilesTab:
         self._qtwidgets = qtwidgets
         self._logger = logging.getLogger("app_gui_qt.files")
         self._on_open_viewer = on_open_viewer
+        self._on_upload = on_upload
+        self._on_download = on_download
         self._on_refresh = on_refresh
         self._cache_store = cache_store
         self._thumbnail_ttl_s = max(0, int(thumbnail_ttl_s))
@@ -55,6 +62,12 @@ class FilesTab:
         self._refresh_timer: object | None = None
         self._refresh_thread: threading.Thread | None = None
         self._refresh_result: dict[str, object] = {}
+        self._upload_timer: object | None = None
+        self._upload_thread: threading.Thread | None = None
+        self._upload_result: dict[str, object] = {}
+        self._download_timer: object | None = None
+        self._download_thread: threading.Thread | None = None
+        self._download_result: dict[str, object] = {}
 
         self.root = qtwidgets.QWidget(parent)
         self.root.setObjectName("tabRoot")
@@ -108,10 +121,10 @@ class FilesTab:
         self._refresh_button.clicked.connect(self.refresh)
         row.addWidget(self._refresh_button)
 
-        upload_button = qtwidgets.QPushButton("Upload .pwmb")
-        upload_button.setObjectName("primary")
-        connect_stub_action(upload_button, "Upload")
-        row.addWidget(upload_button)
+        self._upload_button = qtwidgets.QPushButton("Upload .pwmb")
+        self._upload_button.setObjectName("primary")
+        self._upload_button.clicked.connect(self._start_upload)
+        row.addWidget(self._upload_button)
 
         row.addStretch(1)
         return row
@@ -137,6 +150,9 @@ class FilesTab:
         if self._on_refresh is None:
             self._status_label.setText("No cloud refresh callback configured.")
             return
+        if self._upload_thread is not None and self._upload_thread.is_alive():
+            self._status_label.setText("Upload in progress. Please wait.")
+            return
         if self._refresh_thread is not None and self._refresh_thread.is_alive():
             return
 
@@ -150,6 +166,7 @@ class FilesTab:
                 self._refresh_result["files"] = files
                 self._refresh_result["error_message"] = error_message
             except Exception as exc:
+                self._logger.exception("Files refresh worker failed.")
                 self._refresh_result["exception"] = str(exc)
 
         self._refresh_thread = threading.Thread(target=_worker, daemon=True, name="files-refresh")
@@ -200,6 +217,133 @@ class FilesTab:
             self._status_label.setText(f"Loaded {len(files)} files from cloud API.")
         else:
             self._status_label.setText("No file returned by cloud API.")
+
+    def _start_upload(self) -> None:
+        qtwidgets = self._qtwidgets
+        callback = self._on_upload
+        if callback is None:
+            qtwidgets.QMessageBox.information(
+                self.root,
+                "Upload",
+                "No cloud upload callback configured.",
+            )
+            return
+
+        if self._refresh_thread is not None and self._refresh_thread.is_alive():
+            qtwidgets.QMessageBox.information(
+                self.root,
+                "Refresh in progress",
+                "Wait for refresh to finish before starting upload.",
+            )
+            return
+
+        if self._upload_thread is not None and self._upload_thread.is_alive():
+            qtwidgets.QMessageBox.information(
+                self.root,
+                "Upload in progress",
+                "A file upload is already running.",
+            )
+            return
+
+        source_path = self._choose_upload_source()
+        if source_path is None:
+            return
+
+        if not source_path.exists() or not source_path.is_file():
+            message = f"Selected path is not a file:\n{source_path}"
+            self._status_label.setText(message)
+            qtwidgets.QMessageBox.warning(self.root, "Upload failed", message)
+            return
+
+        if source_path.suffix.lower() != ".pwmb":
+            message = f"Only .pwmb files are supported:\n{source_path.name}"
+            self._status_label.setText(message)
+            qtwidgets.QMessageBox.warning(self.root, "Upload failed", message)
+            return
+
+        file_name = source_path.name
+        self._upload_button.setEnabled(False)
+        self._status_label.setText(f"Uploading {file_name}...")
+        self._upload_result = {
+            "source": str(source_path),
+            "file_name": file_name,
+        }
+
+        def _worker() -> None:
+            try:
+                file_id = callback(str(source_path))
+                self._upload_result["file_id"] = str(file_id).strip() if file_id is not None else ""
+            except Exception as exc:
+                self._logger.exception(
+                    "Upload worker failed source=%s",
+                    source_path,
+                )
+                self._upload_result["exception"] = str(exc)
+
+        self._upload_thread = threading.Thread(target=_worker, daemon=True, name="files-upload")
+        self._upload_thread.start()
+
+        timer = self._qtcore.QTimer(self.root)
+        timer.setInterval(80)
+        timer.timeout.connect(self._poll_upload_result)
+        timer.start()
+        self._upload_timer = timer
+
+    def _choose_upload_source(self) -> Path | None:
+        qtwidgets = self._qtwidgets
+        default_dir = Path.home() / "Downloads"
+        selected_path, _selected_filter = qtwidgets.QFileDialog.getOpenFileName(
+            self.root,
+            "Select .pwmb file",
+            str(default_dir),
+            "PWMB files (*.pwmb);;All files (*)",
+        )
+        if not selected_path:
+            return None
+        return Path(selected_path).expanduser()
+
+    def _poll_upload_result(self) -> None:
+        if self._upload_thread is not None and self._upload_thread.is_alive():
+            return
+
+        if self._upload_timer is not None:
+            self._upload_timer.stop()
+            self._upload_timer = None
+
+        result = dict(self._upload_result)
+        self._upload_thread = None
+        self._upload_result = {}
+        self._upload_button.setEnabled(True)
+
+        file_name = str(result.get("file_name") or "file")
+        file_id = str(result.get("file_id") or "").strip()
+        exception = result.get("exception")
+        qtwidgets = self._qtwidgets
+
+        if isinstance(exception, str) and exception.strip():
+            message = f"Upload failed for {file_name}: {exception}"
+            self._logger.error(message)
+            self._status_label.setText(message)
+            qtwidgets.QMessageBox.warning(self.root, "Upload failed", message)
+            return
+
+        if file_id:
+            self._status_label.setText(f"Uploaded {file_name} (id={file_id}). Refreshing list...")
+            qtwidgets.QMessageBox.information(
+                self.root,
+                "Upload complete",
+                f"{file_name}\n\nCloud file id:\n{file_id}",
+            )
+        else:
+            self._status_label.setText(f"Uploaded {file_name}. Refreshing list...")
+            qtwidgets.QMessageBox.information(
+                self.root,
+                "Upload complete",
+                f"{file_name} uploaded successfully.",
+            )
+
+        if self._on_refresh is not None:
+            self.refresh()
 
     def set_quota(self, quota: Quota) -> None:
         self._quota = quota
@@ -313,10 +457,15 @@ class FilesTab:
         )
         actions.addWidget(details_button)
 
-        for label in ["Print", "Download"]:
-            button = qtwidgets.QPushButton(label)
-            connect_stub_action(button, f"{label} for {file_item.name}")
-            actions.addWidget(button)
+        print_button = qtwidgets.QPushButton("Print")
+        connect_stub_action(print_button, f"Print for {file_item.name}")
+        actions.addWidget(print_button)
+
+        download_button = qtwidgets.QPushButton("Download")
+        download_button.clicked.connect(
+            lambda _checked=False, item=file_item: self._start_download(item)
+        )
+        actions.addWidget(download_button)
 
         if file_item.name.lower().endswith(".pwmb"):
             view_button = qtwidgets.QPushButton("Open 3D Viewer")
@@ -330,6 +479,133 @@ class FilesTab:
         right_layout.addLayout(actions)
         card_layout.addWidget(right, 1)
         return card
+
+    def _start_download(self, file_item: FileItem) -> None:
+        qtwidgets = self._qtwidgets
+        callback = self._on_download
+        if callback is None:
+            qtwidgets.QMessageBox.information(
+                self.root,
+                "Download",
+                "No cloud download callback configured.",
+            )
+            return
+
+        if self._download_thread is not None and self._download_thread.is_alive():
+            qtwidgets.QMessageBox.information(
+                self.root,
+                "Download in progress",
+                "A file download is already running.",
+            )
+            return
+
+        destination = self._choose_download_destination(file_item)
+        if destination is None:
+            return
+
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            self._logger.exception(
+                "Download destination preparation failed path=%s",
+                destination.parent,
+            )
+            qtwidgets.QMessageBox.warning(
+                self.root,
+                "Download failed",
+                f"Cannot create destination folder:\n{destination.parent}\n\n{exc}",
+            )
+            return
+
+        file_name = file_item.name or file_item.file_id or destination.name
+        self._status_label.setText(f"Downloading {file_name}...")
+        self._download_result = {
+            "destination": str(destination),
+            "file_name": file_name,
+            "file_id": file_item.file_id,
+        }
+
+        def _worker() -> None:
+            try:
+                callback(file_item, str(destination))
+            except Exception as exc:
+                self._logger.exception(
+                    "Download worker failed file_id=%s name=%s destination=%s",
+                    file_item.file_id,
+                    file_item.name,
+                    destination,
+                )
+                self._download_result["exception"] = str(exc)
+
+        self._download_thread = threading.Thread(target=_worker, daemon=True, name="files-download")
+        self._download_thread.start()
+
+        timer = self._qtcore.QTimer(self.root)
+        timer.setInterval(80)
+        timer.timeout.connect(self._poll_download_result)
+        timer.start()
+        self._download_timer = timer
+
+    def _choose_download_destination(self, file_item: FileItem) -> Path | None:
+        qtwidgets = self._qtwidgets
+        suggested_name = _suggest_download_filename(file_item)
+        default_path = Path.home() / "Downloads" / suggested_name
+        selected_path, _selected_filter = qtwidgets.QFileDialog.getSaveFileName(
+            self.root,
+            "Save cloud file",
+            str(default_path),
+            "PWMB files (*.pwmb);;All files (*)",
+        )
+        if not selected_path:
+            return None
+
+        destination = Path(selected_path).expanduser()
+        if destination.exists():
+            answer = qtwidgets.QMessageBox.question(
+                self.root,
+                "Overwrite existing file?",
+                f"The file already exists:\n{destination}\n\nDo you want to overwrite it?",
+                qtwidgets.QMessageBox.StandardButton.Yes | qtwidgets.QMessageBox.StandardButton.No,
+                qtwidgets.QMessageBox.StandardButton.No,
+            )
+            if answer != qtwidgets.QMessageBox.StandardButton.Yes:
+                return None
+        return destination
+
+    def _poll_download_result(self) -> None:
+        if self._download_thread is not None and self._download_thread.is_alive():
+            return
+
+        if self._download_timer is not None:
+            self._download_timer.stop()
+            self._download_timer = None
+
+        result = dict(self._download_result)
+        self._download_thread = None
+        self._download_result = {}
+
+        file_name = str(result.get("file_name") or "file")
+        destination = result.get("destination")
+        exception = result.get("exception")
+        qtwidgets = self._qtwidgets
+
+        if isinstance(exception, str) and exception.strip():
+            message = f"Download failed for {file_name}: {exception}"
+            self._logger.error(message)
+            self._status_label.setText(message)
+            qtwidgets.QMessageBox.warning(self.root, "Download failed", message)
+            return
+
+        if isinstance(destination, str) and destination:
+            self._status_label.setText(f"Downloaded {file_name}.")
+            qtwidgets.QMessageBox.information(
+                self.root,
+                "Download complete",
+                f"{file_name}\n\nSaved to:\n{destination}",
+            )
+            return
+
+        self._status_label.setText(f"Downloaded {file_name}.")
 
     def _open_viewer_for_file(self, file_item: FileItem) -> None:
         if self._on_open_viewer is None:
@@ -573,9 +849,56 @@ def _fmt_dim(value: float | None) -> str:
     return f"{value:.3g}"
 
 
+def _suggest_download_filename(file_item: FileItem) -> str:
+    base_name = _sanitize_filename(file_item.name)
+    extension = _normalize_extension(file_item.file_extension)
+    if base_name:
+        if "." not in base_name and extension:
+            return f"{base_name}.{extension}"
+        return base_name
+
+    fallback = _sanitize_filename(file_item.file_id) or "cloud-file"
+    if extension and "." not in fallback:
+        return f"{fallback}.{extension}"
+    return fallback
+
+
+def _sanitize_filename(value: str | None) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    cleaned_chars: list[str] = []
+    forbidden = '<>:"/\\|?*'
+    for char in text:
+        if ord(char) < 32 or char in forbidden:
+            cleaned_chars.append("_")
+        else:
+            cleaned_chars.append(char)
+    cleaned = "".join(cleaned_chars).strip().strip(".")
+    if cleaned in {"", ".", ".."}:
+        return ""
+    return cleaned
+
+
+def _normalize_extension(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip().lstrip(".")
+    if not text:
+        return None
+    cleaned = "".join(char for char in text if char.isalnum())
+    if not cleaned:
+        return None
+    return cleaned
+
+
 def build_files_tab(
     parent=None,
     on_open_viewer=None,
+    on_upload: UploadCallback | None = None,
+    on_download: DownloadCallback | None = None,
     on_refresh: RefreshCallback | None = None,
     auto_refresh: bool = False,
     cache_store: CacheStore | None = None,
@@ -584,6 +907,8 @@ def build_files_tab(
     tab = FilesTab(
         parent=parent,
         on_open_viewer=on_open_viewer,
+        on_upload=on_upload,
+        on_download=on_download,
         on_refresh=on_refresh,
         cache_store=cache_store,
         thumbnail_ttl_s=thumbnail_ttl_s,

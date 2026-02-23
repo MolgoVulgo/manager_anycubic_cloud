@@ -67,13 +67,14 @@ Exemple : `GET /p/p/workbench/api/v3/public/getoauthToken`
 - Si champs absents: garder `extra` brut pour compatibilité.
 
 6. **`POST /p/p/workbench/api/work/index/getDowdLoadUrl`**
-- Attendu: URL signée dans `data.url` (ou équivalent).
-- Interprétation: effectuer un `GET` direct sur URL signée.
+- Attendu: URL signée dans `data.url` (ou équivalent), ou directement `data` sous forme de string URL.
+- Requête recommandée: envoyer `id` numérique quand `file_id` est numérique (comportement le plus compatible observé), puis fallback sur variantes de champs (`file_id`, `fileId`, `ids`) si besoin.
+- Interprétation: effectuer un `GET` direct sur URL signée, sans headers d'auth cloud (`Authorization`, `XX-*`).
 - Si URL absente: erreur métier (download impossible).
 
 7. **Upload: `lockStorageSpace` -> `PUT preSignUrl` -> `newUploadFile` -> `unlockStorageSpace`**
 - `lockStorageSpace`: doit fournir `preSignUrl` + `id` lock.
-- `PUT preSignUrl`: succès binaire (`200/201`).
+- `PUT preSignUrl`: succès binaire (`200/201`) sans headers d'auth cloud (`Authorization`, `XX-*`).
 - `newUploadFile`: attendu `data.id` (file_id enregistré).
 - `unlockStorageSpace`: appeler même en erreur partielle (best effort).
 - Interprétation: upload réussi uniquement si `PUT` + `register` valides.

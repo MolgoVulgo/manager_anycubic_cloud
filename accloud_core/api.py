@@ -238,28 +238,41 @@ class AnycubicCloudApi:
 
     def download_file(self, file_id: str, destination: str) -> None:
         endpoint = ENDPOINTS["download"]
+        normalized_id = str(file_id).strip()
+        payload_attempts: list[Mapping[str, Any]] = []
+        if normalized_id.isdigit():
+            numeric_id = int(normalized_id)
+            payload_attempts.append({"id": numeric_id})
+            payload_attempts.append({"ids": [numeric_id]})
+        payload_attempts.extend(
+            [
+                {"id": normalized_id},
+                {"file_id": normalized_id},
+                {"fileId": normalized_id},
+                {"ids": [normalized_id]},
+            ]
+        )
         payload = _request_json_with_fallback(
             self._client,
             endpoint.method,
             endpoint.path,
-            payload_attempts=(
-                {"id": file_id},
-                {"file_id": file_id},
-                {"fileId": file_id},
-                {"ids": [file_id]},
-            ),
+            payload_attempts=tuple(payload_attempts),
             expected_status=(200, 201),
         )
         try:
-            data = _extract_data(payload)
-            signed_url = _to_optional_str(
-                pick_first(data, "url", "download_url", "signedUrl", "signed_url")
-            )
-            if not signed_url and isinstance(data, str):
-                signed_url = _to_optional_str(data)
+            _assert_success_payload(payload)
+            raw_data: Any = payload.get("data")
+            signed_url = _extract_download_signed_url(raw_data)
+            if not signed_url:
+                signed_url = _extract_download_signed_url(payload)
             if not signed_url:
                 raise CloudApiError("Missing signed download URL in response")
-            signed_response = self._client.request("GET", signed_url, expected_status=200)
+            signed_response = self._client.request(
+                "GET",
+                signed_url,
+                expected_status=200,
+                include_session_headers=False,
+            )
             try:
                 _write_bytes(Path(destination), signed_response.content)
             finally:
@@ -303,8 +316,8 @@ class AnycubicCloudApi:
                     "PUT",
                     signed_url,
                     expected_status=(200, 201),
-                    content=handle.read(),
-                    headers={"Content-Type": "application/octet-stream"},
+                    content=handle,
+                    include_session_headers=False,
                 )
             upload_response.close()
 
@@ -417,6 +430,32 @@ def _extract_data(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     if "data" in payload and isinstance(payload["data"], dict):
         return _as_map(payload["data"])
     return payload
+
+
+def _extract_download_signed_url(value: Any) -> str | None:
+    if isinstance(value, str):
+        return _to_optional_str(value)
+
+    if isinstance(value, dict):
+        mapping = _as_map(value)
+        signed_url = _to_optional_str(
+            pick_first(mapping, "url", "download_url", "signedUrl", "signed_url")
+        )
+        if signed_url:
+            return signed_url
+        nested = pick_first(mapping, "data", "result")
+        if nested is not None and nested is not value:
+            return _extract_download_signed_url(nested)
+        return None
+
+    if isinstance(value, list):
+        for item in value:
+            signed_url = _extract_download_signed_url(item)
+            if signed_url:
+                return signed_url
+        return None
+
+    return None
 
 
 def _assert_success_payload(payload: Mapping[str, Any]) -> None:

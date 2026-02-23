@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import json
+import logging
 import threading
 
 from accloud_core.models import Printer
@@ -24,6 +25,7 @@ class PrinterTab:
         qtcore, qtwidgets = require_qt()
         self._qtcore = qtcore
         self._qtwidgets = qtwidgets
+        self._logger = logging.getLogger("app_gui_qt.printers")
         self._on_open_print_dialog = on_open_print_dialog
         self._on_refresh = on_refresh
         self._printers: list[Printer] = []
@@ -156,6 +158,7 @@ class PrinterTab:
                 self._refresh_result["printers"] = printers
                 self._refresh_result["error_message"] = error_message
             except Exception as exc:
+                self._logger.exception("Printer refresh worker failed.")
                 self._refresh_result["exception"] = str(exc)
 
         self._refresh_thread = threading.Thread(target=_worker, daemon=True, name="printers-refresh")
