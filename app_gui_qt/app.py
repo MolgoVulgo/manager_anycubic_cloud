@@ -1238,6 +1238,12 @@ def build_main_window(
 
     window._files_tab_controller = getattr(files_widget, "_files_tab_controller", None)  # type: ignore[attr-defined]
     window._printer_tab_controller = getattr(printer_widget, "_printer_tab_controller", None)  # type: ignore[attr-defined]
+    if (
+        window._files_tab_controller is not None  # type: ignore[attr-defined]
+        and window._printer_tab_controller is not None  # type: ignore[attr-defined]
+        and hasattr(window._files_tab_controller, "set_on_post_print_refresh")  # type: ignore[attr-defined]
+    ):
+        window._files_tab_controller.set_on_post_print_refresh(window._printer_tab_controller.refresh)  # type: ignore[attr-defined]
     window._session_import_cb = session_import_cb  # type: ignore[attr-defined]
     window._refresh_files_cb = refresh_cb  # type: ignore[attr-defined]
     window._refresh_printers_cb = refresh_printers_cb  # type: ignore[attr-defined]

@@ -250,8 +250,7 @@ class PrinterTab:
         layout.addLayout(top)
 
         line_1 = f"Model: {printer.model or '-'}   |   Type: {printer.printer_type or '-'}"
-        line_2 = f"State: {printer.state or '-'}"
-        line_3 = f"Material: {printer.material_type or '-'}"
+        line_2 = f"Material: {printer.material_type or '-'}   |   State: {printer.state or '-'}"
         line_4 = (
             f"File: {_format_file_name(printer.current_file_name)}   |   "
             f"Progress: {_format_progress(printer.progress_percent)}"
@@ -263,7 +262,6 @@ class PrinterTab:
         )
         layout.addWidget(qtwidgets.QLabel(line_1))
         layout.addWidget(qtwidgets.QLabel(line_2))
-        layout.addWidget(qtwidgets.QLabel(line_3))
         layout.addWidget(qtwidgets.QLabel(line_4))
         layout.addWidget(qtwidgets.QLabel(line_5))
 

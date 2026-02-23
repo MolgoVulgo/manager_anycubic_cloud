@@ -21,6 +21,7 @@ DownloadCallback = Callable[[FileItem, str], None]
 DeleteCallback = Callable[[FileItem], None]
 ListPrintersCallback = Callable[[], tuple[list[Printer], str | None]]
 PrintCallback = Callable[[FileItem, Printer], None]
+PostPrintRefreshCallback = Callable[[], None]
 
 
 def _require_qt_gui():
@@ -58,6 +59,7 @@ class FilesTab:
         self._on_delete = on_delete
         self._on_list_printers = on_list_printers
         self._on_print = on_print
+        self._on_post_print_refresh: PostPrintRefreshCallback | None = None
         self._on_refresh = on_refresh
         self._cache_store = cache_store
         self._thumbnail_ttl_s = max(0, int(thumbnail_ttl_s))
@@ -805,11 +807,33 @@ class FilesTab:
 
         message = f"Print order sent for {file_name} on {printer_name}."
         self._status_label.setText(message)
+        self._trigger_post_print_refresh()
         qtwidgets.QMessageBox.information(
             self.root,
             "Print order sent",
             message,
         )
+
+    def set_on_post_print_refresh(self, callback: PostPrintRefreshCallback | None) -> None:
+        self._on_post_print_refresh = callback
+
+    def _trigger_post_print_refresh(self) -> None:
+        callback = self._on_post_print_refresh
+        if callback is None:
+            return
+
+        try:
+            callback()
+        except Exception:
+            self._logger.exception("Post-print printer refresh callback failed (immediate).")
+
+        def _delayed_refresh() -> None:
+            try:
+                callback()
+            except Exception:
+                self._logger.exception("Post-print printer refresh callback failed (delayed).")
+
+        self._qtcore.QTimer.singleShot(3500, _delayed_refresh)
 
     def _start_download(self, file_item: FileItem) -> None:
         qtwidgets = self._qtwidgets

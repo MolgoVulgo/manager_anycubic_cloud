@@ -162,6 +162,7 @@ Documenter de facon exhaustive tous les boutons lies a l'onglet `Files` et leur 
 - Succes:
   - statut `Print order sent for <file_name> on <printer_name>.`
   - popup `Print order sent`.
+  - refresh du statut imprimante declenche immediatement apres succes (onglet `Printer`), puis second refresh differe (~3.5s) pour capter la propagation cloud.
 - Echec:
   - chargement imprimantes: popup `Print failed` + message `Could not load printers: ...`
   - envoi ordre: popup `Print failed` + message `Print failed for <file_name> on <printer_name>: ...`
