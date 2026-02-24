@@ -56,7 +56,9 @@ def decode_pws_layer(
     anti_aliasing: int,
     convention: PwsConvention | None = None,
     lut: Sequence[int] | None = None,
-) -> list[int]:
+    *,
+    as_array: bool = False,
+) -> list[int] | np.ndarray:
     _ = lut
     if width <= 0 or height <= 0:
         raise PwsDecodeError("Invalid PWS dimensions")
@@ -92,8 +94,10 @@ def decode_pws_layer(
                 counts[pixel : pixel + run_len] += 1
             pixel += run_len
 
-    projection = np.rint((255.0 * counts.astype(np.float64)) / float(anti_aliasing))
-    return projection.astype(np.uint8).tolist()
+    projection = np.rint((255.0 * counts.astype(np.float64)) / float(anti_aliasing)).astype(np.uint8)
+    if as_array:
+        return projection
+    return projection.tolist()
 
 
 def _dry_run(blob: bytes, width: int, height: int, anti_aliasing: int, convention: PwsConvention) -> _DryRunResult:

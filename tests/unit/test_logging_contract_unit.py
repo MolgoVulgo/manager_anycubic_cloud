@@ -9,6 +9,7 @@ from accloud_core.logging_contract import (
     AppLogFilter,
     HttpLogFilter,
     JsonLineFormatter,
+    Render3DLogFilter,
     build_queue_listener,
     emit_event,
     operation_context,
@@ -116,12 +117,40 @@ def test_filters_keep_http_logs_exclusive() -> None:
     assert AppLogFilter().filter(app_record) is True
 
 
+def test_render3d_filter_keeps_3d_components_only() -> None:
+    render_record = logging.makeLogRecord(
+        {
+            "name": "render3d_core.geometry_v2",
+            "levelno": logging.INFO,
+            "levelname": "INFO",
+            "msg": "Geometry built",
+            "accloud_component": "render3d.build",
+            "accloud_event": "build.stage_done",
+        }
+    )
+    app_record = logging.makeLogRecord(
+        {
+            "name": "app_gui_qt.app",
+            "levelno": logging.INFO,
+            "levelname": "INFO",
+            "msg": "Session imported",
+            "accloud_component": "app.gui",
+            "accloud_event": "ui.action",
+        }
+    )
+
+    assert Render3DLogFilter().filter(render_record) is True
+    assert Render3DLogFilter().filter(app_record) is False
+
+
 def test_queue_listener_routes_app_and_http_to_separate_files(tmp_path: Path) -> None:
     app_log_path = tmp_path / "accloud_app.log"
     http_log_path = tmp_path / "accloud_http.log"
+    render3d_log_path = tmp_path / "accloud_render3d.log"
     queue_handler, listener = build_queue_listener(
         app_log_path=app_log_path,
         http_log_path=http_log_path,
+        render3d_log_path=render3d_log_path,
         app_level=logging.INFO,
         http_level=logging.INFO,
         max_bytes=1024 * 1024,
@@ -150,6 +179,14 @@ def test_queue_listener_routes_app_and_http_to_separate_files(tmp_path: Path) ->
             msg="HTTP call",
             component="accloud.http",
         )
+        emit_event(
+            root,
+            logging.INFO,
+            event="build.stage_done",
+            msg="Geometry built",
+            component="render3d.build",
+            data={"render3d": {"stage": "triangulate", "tris": 10}},
+        )
         time.sleep(0.1)
     finally:
         listener.stop()
@@ -157,8 +194,11 @@ def test_queue_listener_routes_app_and_http_to_separate_files(tmp_path: Path) ->
 
     app_lines = [line for line in app_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     http_lines = [line for line in http_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    render3d_lines = [line for line in render3d_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
-    assert len(app_lines) == 1
+    assert len(app_lines) == 2
     assert len(http_lines) == 1
+    assert len(render3d_lines) == 1
     assert json.loads(app_lines[0])["event"] == "ui.action"
     assert json.loads(http_lines[0])["event"] == "http.request"
+    assert json.loads(render3d_lines[0])["event"] == "build.stage_done"

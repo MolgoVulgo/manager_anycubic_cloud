@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from pwmb_core.decode_pw0 import Pw0DecodeError, decode_pw0_layer
@@ -41,6 +42,20 @@ def test_decode_pw0_rejects_short_frame() -> None:
         _ = decode_pw0_layer(blob=blob, width=4, height=1)
 
 
+def test_decode_pw0_non_strict_tolerates_zero_run() -> None:
+    blob = _pw0_word(1, 0) + _pw0_word(2, 1)
+    decoded = decode_pw0_layer(blob=blob, width=1, height=1, strict=False)
+    assert decoded == [34]
+
+
+def test_decode_pw0_can_return_numpy_array() -> None:
+    blob = _pw0_word(3, 2)
+    decoded = decode_pw0_layer(blob=blob, width=2, height=1, as_array=True)
+    assert isinstance(decoded, np.ndarray)
+    assert decoded.dtype == np.uint8
+    assert decoded.tolist() == [51, 51]
+
+
 def test_select_pws_convention_prefers_valid_candidate() -> None:
     convention = select_pws_convention(blob=bytes([0x83]), width=4, height=1, anti_aliasing=1)
     assert convention is PwsConvention.C1
@@ -58,6 +73,21 @@ def test_decode_pws_anti_aliasing_projection() -> None:
         convention=PwsConvention.C1,
     )
     assert decoded == [255, 128, 0, 0]
+
+
+def test_decode_pws_can_return_numpy_array() -> None:
+    blob = bytes([0x83])
+    decoded = decode_pws_layer(
+        blob=blob,
+        width=4,
+        height=1,
+        anti_aliasing=1,
+        convention=PwsConvention.C1,
+        as_array=True,
+    )
+    assert isinstance(decoded, np.ndarray)
+    assert decoded.dtype == np.uint8
+    assert decoded.tolist() == [255, 255, 255, 255]
 
 
 def test_decode_pws_rejects_zero_run_when_c0_forced() -> None:

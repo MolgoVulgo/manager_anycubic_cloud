@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import logging
 import math
+from time import perf_counter
 
+from accloud_core.logging_contract import emit_event, get_op_id
+from render3d_core.perf import BuildMetrics
 from render3d_core.types import LayerRange, Point2D, PwmbContourGeometry, PwmbContourStack
 
 
 Point3DLayer = tuple[float, float, float, float]
+LOGGER_BUILD = logging.getLogger("render3d.build")
 
 
 def build_geometry_v2(
@@ -15,88 +20,157 @@ def build_geometry_v2(
     max_layers: int | None = None,
     max_vertices: int | None = None,
     max_xy_stride: int = 1,
+    metrics: BuildMetrics | None = None,
 ) -> PwmbContourGeometry:
-    geometry = PwmbContourGeometry()
-    if not stack.layers:
+    op_id = get_op_id()
+    emit_event(
+        LOGGER_BUILD,
+        logging.INFO,
+        event="build.stage_start",
+        msg="Geometry build stage started",
+        component="render3d.build",
+        op_id=op_id,
+        data={"render3d": {"stage": "triangulate", "layers_visible": len(stack.layers)}},
+    )
+    try:
+        start_ms = perf_counter()
+        geometry = PwmbContourGeometry()
+        if not stack.layers:
+            emit_event(
+                LOGGER_BUILD,
+                logging.INFO,
+                event="build.stage_done",
+                msg="Geometry build stage completed (empty stack)",
+                component="render3d.build",
+                op_id=op_id,
+                data={"render3d": {"stage": "triangulate", "layers_visible": 0, "tris": 0, "verts": 0}},
+            )
+            return geometry
+
+        stride = max(1, int(max_xy_stride))
+        layer_ids = sorted(stack.layers.keys())
+        if max_layers is not None and max_layers > 0:
+            layer_ids = layer_ids[: int(max_layers)]
+        if not layer_ids:
+            emit_event(
+                LOGGER_BUILD,
+                logging.INFO,
+                event="build.stage_done",
+                msg="Geometry build stage completed (no selected layers)",
+                component="render3d.build",
+                op_id=op_id,
+                data={"render3d": {"stage": "triangulate", "layers_visible": 0, "tris": 0, "verts": 0}},
+            )
+            return geometry
+
+        z_center = (float(layer_ids[0]) + float(layer_ids[-1])) * 0.5
+        vertex_budget = max_vertices if max_vertices is not None and max_vertices > 0 else None
+
+        stop_all = False
+        for layer_id in layer_ids:
+            layer_loops = stack.layers.get(layer_id)
+            if layer_loops is None:
+                continue
+            z = (float(layer_id) - z_center) * float(stack.pitch_z_mm)
+
+            outer_loops = [_prepare_loop(loop, stride=stride) for loop in layer_loops.outer]
+            hole_loops = [_prepare_loop(loop, stride=stride) for loop in layer_loops.holes]
+            outer_loops = [loop for loop in outer_loops if len(loop) >= 3 and abs(_signed_area(loop)) > 1e-12]
+            hole_loops = [loop for loop in hole_loops if len(loop) >= 3 and abs(_signed_area(loop)) > 1e-12]
+
+            tri_start = len(geometry.triangle_vertices)
+            tri_count = 0
+            hole_map = _assign_holes_to_outers(outer_loops, hole_loops)
+            for outer_index, outer in enumerate(outer_loops):
+                holes = hole_map.get(outer_index, [])
+                triangles = _triangulate_polygon_with_holes(outer, holes)
+                for a, b, c in triangles:
+                    if _would_exceed_budget(geometry, vertex_budget, additional=3):
+                        stop_all = True
+                        break
+                    tri_count += 3
+                    geometry.triangle_vertices.extend(
+                        [
+                            _to_point4(a, z, layer_id),
+                            _to_point4(b, z, layer_id),
+                            _to_point4(c, z, layer_id),
+                        ]
+                    )
+                if stop_all:
+                    break
+            geometry.tri_range[layer_id] = LayerRange(start=tri_start, count=tri_count)
+
+            line_start = len(geometry.line_vertices)
+            line_count = 0
+            point_start = len(geometry.point_vertices)
+            point_count = 0
+            for loop in [*outer_loops, *hole_loops]:
+                size = len(loop)
+                for idx in range(size):
+                    if _would_exceed_budget(geometry, vertex_budget, additional=2):
+                        stop_all = True
+                        break
+                    p1 = loop[idx]
+                    p2 = loop[(idx + 1) % size]
+                    geometry.line_vertices.append(_to_point4(p1, z, layer_id))
+                    geometry.line_vertices.append(_to_point4(p2, z, layer_id))
+                    line_count += 2
+                if stop_all:
+                    break
+                for point in loop:
+                    if _would_exceed_budget(geometry, vertex_budget, additional=1):
+                        stop_all = True
+                        break
+                    geometry.point_vertices.append(_to_point4(point, z, layer_id))
+                    point_count += 1
+                if stop_all:
+                    break
+
+            geometry.line_range[layer_id] = LayerRange(start=line_start, count=line_count)
+            geometry.point_range[layer_id] = LayerRange(start=point_start, count=point_count)
+
+            if stop_all:
+                break
+
+        triangulation_ms = (perf_counter() - start_ms) * 1000.0
+        if metrics is not None:
+            metrics.triangulation_ms_total += triangulation_ms
+            metrics.triangles_total = len(geometry.triangle_vertices) // 3
+            metrics.vertices_total = (
+                len(geometry.triangle_vertices)
+                + len(geometry.line_vertices)
+                + len(geometry.point_vertices)
+            )
+
+        emit_event(
+            LOGGER_BUILD,
+            logging.INFO,
+            event="build.stage_done",
+            msg="Geometry build stage completed",
+            component="render3d.build",
+            op_id=op_id,
+            data={
+                "render3d": {
+                    "stage": "triangulate",
+                    "layers_visible": len(layer_ids),
+                    "tris": len(geometry.triangle_vertices) // 3,
+                    "verts": len(geometry.triangle_vertices),
+                }
+            },
+        )
         return geometry
-
-    stride = max(1, int(max_xy_stride))
-    layer_ids = sorted(stack.layers.keys())
-    if max_layers is not None and max_layers > 0:
-        layer_ids = layer_ids[: int(max_layers)]
-    if not layer_ids:
-        return geometry
-
-    z_center = (float(layer_ids[0]) + float(layer_ids[-1])) * 0.5
-    vertex_budget = max_vertices if max_vertices is not None and max_vertices > 0 else None
-
-    stop_all = False
-    for layer_id in layer_ids:
-        layer_loops = stack.layers.get(layer_id)
-        if layer_loops is None:
-            continue
-        z = (float(layer_id) - z_center) * float(stack.pitch_z_mm)
-
-        outer_loops = [_prepare_loop(loop, stride=stride) for loop in layer_loops.outer]
-        hole_loops = [_prepare_loop(loop, stride=stride) for loop in layer_loops.holes]
-        outer_loops = [loop for loop in outer_loops if len(loop) >= 3 and abs(_signed_area(loop)) > 1e-12]
-        hole_loops = [loop for loop in hole_loops if len(loop) >= 3 and abs(_signed_area(loop)) > 1e-12]
-
-        tri_start = len(geometry.triangle_vertices)
-        tri_count = 0
-        hole_map = _assign_holes_to_outers(outer_loops, hole_loops)
-        for outer_index, outer in enumerate(outer_loops):
-            holes = hole_map.get(outer_index, [])
-            triangles = _triangulate_polygon_with_holes(outer, holes)
-            for a, b, c in triangles:
-                if _would_exceed_budget(geometry, vertex_budget, additional=3):
-                    stop_all = True
-                    break
-                tri_count += 3
-                geometry.triangle_vertices.extend(
-                    [
-                        _to_point4(a, z, layer_id),
-                        _to_point4(b, z, layer_id),
-                        _to_point4(c, z, layer_id),
-                    ]
-                )
-            if stop_all:
-                break
-        geometry.tri_range[layer_id] = LayerRange(start=tri_start, count=tri_count)
-
-        line_start = len(geometry.line_vertices)
-        line_count = 0
-        point_start = len(geometry.point_vertices)
-        point_count = 0
-        for loop in [*outer_loops, *hole_loops]:
-            size = len(loop)
-            for idx in range(size):
-                if _would_exceed_budget(geometry, vertex_budget, additional=2):
-                    stop_all = True
-                    break
-                p1 = loop[idx]
-                p2 = loop[(idx + 1) % size]
-                geometry.line_vertices.append(_to_point4(p1, z, layer_id))
-                geometry.line_vertices.append(_to_point4(p2, z, layer_id))
-                line_count += 2
-            if stop_all:
-                break
-            for point in loop:
-                if _would_exceed_budget(geometry, vertex_budget, additional=1):
-                    stop_all = True
-                    break
-                geometry.point_vertices.append(_to_point4(point, z, layer_id))
-                point_count += 1
-            if stop_all:
-                break
-
-        geometry.line_range[layer_id] = LayerRange(start=line_start, count=line_count)
-        geometry.point_range[layer_id] = LayerRange(start=point_start, count=point_count)
-
-        if stop_all:
-            break
-
-    return geometry
+    except Exception as exc:
+        emit_event(
+            LOGGER_BUILD,
+            logging.ERROR,
+            event="build.stage_fail",
+            msg="Geometry build stage failed",
+            component="render3d.build",
+            op_id=op_id,
+            data={"render3d": {"stage": "triangulate"}},
+            error={"type": type(exc).__name__, "message": str(exc)},
+        )
+        raise
 
 
 def _prepare_loop(loop: list[Point2D], *, stride: int) -> list[Point2D]:

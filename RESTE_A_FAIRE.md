@@ -5,11 +5,11 @@ Contexte: lots A (pipeline CPU contours/géométrie) et B (viewer OpenGL + wirin
 
 ## Priorité 1 - Lot C
 
-- [ ] Brancher le cache 3D réel (contours + geometry) avec clés d'invalidation complètes.
-- [ ] Appliquer strictement les règles d'invalidation selon les paramètres build (`threshold`, `bin_mode`, strides, budgets, simplification, render mode).
-- [ ] Ajouter l'instrumentation perf CPU/GPU (`parse/decode/contours/triangulation/upload/draw`) avec logs stables.
-- [ ] Ajouter la gestion explicite des stages de progression (`read`, `decode`, `contours`, `geometry`, `upload`, `done`, `cache`) dans le viewer.
-- [ ] Rendre non-bloquant le chargement d'un fichier cloud pour le viewer (download async au lieu du callback synchrone).
+- [x] Brancher le cache 3D réel (contours + geometry) avec clés d'invalidation complètes.
+- [x] Appliquer strictement les règles d'invalidation selon les paramètres build (`threshold`, `bin_mode`, strides, budgets, simplification, render mode).
+- [x] Ajouter l'instrumentation perf CPU/GPU (`parse/decode/contours/triangulation/upload/draw`) avec logs stables.
+- [x] Ajouter la gestion explicite des stages de progression (`read`, `decode`, `contours`, `geometry`, `upload`, `done`, `cache`) dans le viewer.
+- [x] Rendre non-bloquant le chargement d'un fichier cloud pour le viewer (download async au lieu du callback synchrone).
 
 ## Qualité Technique
 
@@ -21,9 +21,9 @@ Contexte: lots A (pipeline CPU contours/géométrie) et B (viewer OpenGL + wirin
 
 ## Tests à Ajouter
 
-- [ ] Tests unitaires de cache/invalidation 3D.
-- [ ] Tests unitaires des métriques perf.
-- [ ] Tests unitaires du callback `open_viewer` avec résolution de fichier local/cache/download.
+- [x] Tests unitaires de cache/invalidation 3D.
+- [x] Tests unitaires des métriques perf.
+- [x] Tests unitaires du callback `open_viewer` avec résolution de fichier local/cache/download.
 - [ ] Tests d'intégration du pipeline viewer (build async -> upload -> draw/ranges visibles).
 - [ ] Goldens PWMB (`cube`, `cube2`, `misteer`) pour non-régression orientation/bbox/checksum.
 - [ ] E2E minimal GUI: ouverture viewer depuis `Files`, rebuild, changement cutoff/stride sans rebuild CPU.

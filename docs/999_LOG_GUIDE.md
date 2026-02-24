@@ -44,10 +44,15 @@ Ce document est **normatif** : si le code contredit ce guide, le code est consid
 
 * **HTTP (rotations)** : `{LOG_DIR}/accloud_http.log.1`, `.2`, etc.
 
+* **Render 3D (persistant, JSONL)** : `{LOG_DIR}/accloud_render3d.log`
+
+* **Render 3D (rotations)** : `{LOG_DIR}/accloud_render3d.log.1`, `.2`, etc.
+
 Règle de séparation :
 
 * `accloud_http.log` : événements `event` préfixés `http.` et `component=accloud.http` **uniquement**.
 * `accloud_app.log` : **tout le reste** (UI, orchestration, session/auth, API métier, PWMB, 3D/GPU), **sans** événements `http.*`.
+* `accloud_render3d.log` : sous-ensemble dédié rendu 3D (composants `render3d.*`, `pwmb.*`, erreurs/événements viewer 3D).
 
 ### 1.3 Rotation / rétention
 
@@ -66,6 +71,7 @@ Nommage attendu :
 
 * `accloud_app.log.1.gz`, `accloud_app.log.2.gz`, …
 * `accloud_http.log.1.gz`, `accloud_http.log.2.gz`, …
+* `accloud_render3d.log.1.gz`, `accloud_render3d.log.2.gz`, …
 
 Config :
 

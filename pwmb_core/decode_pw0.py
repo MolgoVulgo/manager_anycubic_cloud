@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import numpy as np
+
 from pwmb_core.lut import map_color_index_to_intensity
 
 
@@ -9,7 +11,15 @@ class Pw0DecodeError(ValueError):
     pass
 
 
-def decode_pw0_layer(blob: bytes, width: int, height: int, lut: Sequence[int] | None = None) -> list[int]:
+def decode_pw0_layer(
+    blob: bytes,
+    width: int,
+    height: int,
+    lut: Sequence[int] | None = None,
+    *,
+    strict: bool = True,
+    as_array: bool = False,
+) -> list[int] | np.ndarray:
     if width <= 0 or height <= 0:
         raise Pw0DecodeError("Invalid PW0 dimensions")
 
@@ -17,7 +27,7 @@ def decode_pw0_layer(blob: bytes, width: int, height: int, lut: Sequence[int] | 
     if pixel_count <= 0:
         raise Pw0DecodeError("Invalid PW0 pixel count")
 
-    out = bytearray(pixel_count)
+    out = np.zeros(pixel_count, dtype=np.uint8)
     pixel_pos = 0
     word_count = len(blob) // 2
 
@@ -30,7 +40,9 @@ def decode_pw0_layer(blob: bytes, width: int, height: int, lut: Sequence[int] | 
         color_index = (word >> 12) & 0x0F
         run_len = word & 0x0FFF
         if run_len == 0:
-            raise Pw0DecodeError(f"Invalid PW0 run length 0 at word {word_index}")
+            if strict:
+                raise Pw0DecodeError(f"Invalid PW0 run length 0 at word {word_index}")
+            continue
 
         remaining = pixel_count - pixel_pos
         applied = min(run_len, remaining)
@@ -38,12 +50,15 @@ def decode_pw0_layer(blob: bytes, width: int, height: int, lut: Sequence[int] | 
             continue
 
         intensity = map_color_index_to_intensity(color_index, lut=lut)
-        out[pixel_pos : pixel_pos + applied] = bytes([intensity]) * applied
+        out[pixel_pos : pixel_pos + applied] = intensity
         pixel_pos += applied
 
     if pixel_pos != pixel_count:
-        raise Pw0DecodeError(
-            f"PW0 layer ended before full frame decode: decoded={pixel_pos} expected={pixel_count}"
-        )
+        if strict:
+            raise Pw0DecodeError(
+                f"PW0 layer ended before full frame decode: decoded={pixel_pos} expected={pixel_count}"
+            )
 
-    return list(out)
+    if as_array:
+        return out
+    return out.tolist()

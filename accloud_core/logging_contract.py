@@ -24,6 +24,8 @@ _DEFAULT_DATA_MAX_DEPTH = 6
 _DEFAULT_DATA_MAX_BYTES = 64 * 1024
 _DEFAULT_STACK_MAX_BYTES = 8 * 1024
 _OP_ID_CTX: ContextVar[str] = ContextVar("accloud_op_id", default=str(uuid4()))
+_RENDER3D_COMPONENT_PREFIXES: tuple[str, ...] = ("render3d.", "pwmb.")
+_RENDER3D_STACK_MARKERS: tuple[str, ...] = ("pwmb3d_dialog.py", "render3d_core", "pwmb_core")
 
 _COMPONENT_PREFIXES: tuple[tuple[str, str], ...] = (
     ("accloud.http", "accloud.http"),
@@ -228,12 +230,58 @@ class HttpLogFilter(logging.Filter):
         return component == "accloud.http" and event.startswith("http.")
 
 
+class Render3DLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        component = _resolve_component(record)
+        if component.startswith(_RENDER3D_COMPONENT_PREFIXES):
+            return True
+
+        if component == "app.task":
+            data = getattr(record, "accloud_data", None)
+            if isinstance(data, Mapping) and "render3d" in data:
+                return True
+            message = _opt_text(record.getMessage()).lower()
+            return "render3d" in message or "pwmb" in message or "3d" in message
+
+        if component != "app.gui":
+            return False
+
+        data = getattr(record, "accloud_data", None)
+        if isinstance(data, Mapping):
+            action = _opt_text(data.get("action", None)).lower()
+            if "viewer3d" in action or "render3d" in action or "pwmb" in action:
+                return True
+
+        message = _opt_text(record.getMessage()).lower()
+        if "viewer3d" in message or "render3d" in message or "pwmb" in message:
+            return True
+
+        error = getattr(record, "accloud_error", None)
+        if isinstance(error, Mapping):
+            error_text = str(error).lower()
+            if any(marker in error_text for marker in _RENDER3D_STACK_MARKERS):
+                return True
+
+        exc_info = getattr(record, "exc_info", None)
+        if exc_info:
+            _exc_type, _exc_value, exc_tb = exc_info
+            while exc_tb is not None:
+                filename = _opt_text(exc_tb.tb_frame.f_code.co_filename)
+                if any(marker in filename for marker in _RENDER3D_STACK_MARKERS):
+                    return True
+                exc_tb = exc_tb.tb_next
+
+        return False
+
+
 def build_queue_listener(
     *,
     app_log_path: Path,
     http_log_path: Path,
+    render3d_log_path: Path | None = None,
     app_level: int,
     http_level: int,
+    render3d_level: int | None = None,
     max_bytes: int,
     backups: int,
     compress: bool,
@@ -241,6 +289,8 @@ def build_queue_listener(
 ) -> tuple[StructuredQueueHandler, QueueListener]:
     app_log_path.parent.mkdir(parents=True, exist_ok=True)
     http_log_path.parent.mkdir(parents=True, exist_ok=True)
+    if render3d_log_path is not None:
+        render3d_log_path.parent.mkdir(parents=True, exist_ok=True)
 
     formatter = JsonLineFormatter()
     app_handler = CompressedRotatingFileHandler(
@@ -265,11 +315,29 @@ def build_queue_listener(
     http_handler.setFormatter(formatter)
     http_handler.addFilter(HttpLogFilter())
 
+    handlers: list[logging.Handler] = [app_handler, http_handler]
+    queue_level = min(app_level, http_level)
+
+    if render3d_log_path is not None:
+        effective_render3d_level = app_level if render3d_level is None else int(render3d_level)
+        render3d_handler = CompressedRotatingFileHandler(
+            filename=str(render3d_log_path),
+            max_bytes=max_bytes,
+            backups=backups,
+            compress=compress,
+            compress_level=compress_level,
+        )
+        render3d_handler.setLevel(effective_render3d_level)
+        render3d_handler.setFormatter(formatter)
+        render3d_handler.addFilter(Render3DLogFilter())
+        handlers.append(render3d_handler)
+        queue_level = min(queue_level, effective_render3d_level)
+
     log_queue: queue.SimpleQueue[logging.LogRecord] = queue.SimpleQueue()
     queue_handler = StructuredQueueHandler(log_queue)
-    queue_handler.setLevel(min(app_level, http_level))
+    queue_handler.setLevel(queue_level)
 
-    listener = QueueListener(log_queue, app_handler, http_handler, respect_handler_level=True)
+    listener = QueueListener(log_queue, *handlers, respect_handler_level=True)
     return queue_handler, listener
 
 

@@ -44,6 +44,7 @@ class LogTab:
         app_log_path: Path,
         http_log_path: Path,
         fault_log_path: Path,
+        render3d_log_path: Path | None = None,
     ) -> None:
         _qtcore, qtwidgets = require_qt()
         self._qtcore = _qtcore
@@ -70,6 +71,12 @@ class LogTab:
                 "file_id": None,
             },
         }
+        if render3d_log_path is not None:
+            self._sources["render3d"] = {
+                "path": Path(render3d_log_path),
+                "file_pos": 0,
+                "file_id": None,
+            }
 
         self.root = qtwidgets.QWidget(parent)
         self.root.setObjectName("tabRoot")
@@ -80,7 +87,7 @@ class LogTab:
         title = qtwidgets.QLabel("Runtime Logs")
         title.setObjectName("title")
         subtitle = qtwidgets.QLabel(
-            "Live tail app/http/fault (poll: 1s, rotation/truncate aware, parse fallback)."
+            "Live tail app/http/render3d/fault (poll: 1s, rotation/truncate aware, parse fallback)."
         )
         subtitle.setObjectName("subtitle")
         layout.addWidget(title)
@@ -120,7 +127,8 @@ class LogTab:
         layout.addWidget(self._level_combo, 1)
 
         self._source_combo = qtwidgets.QComboBox()
-        self._source_combo.addItems(["All sources", "app", "http", "fault"])
+        source_items = ["All sources", *self._sources.keys()]
+        self._source_combo.addItems(source_items)
         self._source_combo.currentTextChanged.connect(self._render_view)
         layout.addWidget(self._source_combo, 1)
 
@@ -477,11 +485,19 @@ def _level_matches_filter(*, line_level: int, filter_label: str) -> bool:
     return line_level == expected
 
 
-def build_log_tab(parent=None, *, app_log_path: Path, http_log_path: Path, fault_log_path: Path):
+def build_log_tab(
+    parent=None,
+    *,
+    app_log_path: Path,
+    http_log_path: Path,
+    fault_log_path: Path,
+    render3d_log_path: Path | None = None,
+):
     tab = LogTab(
         parent=parent,
         app_log_path=app_log_path,
         http_log_path=http_log_path,
         fault_log_path=fault_log_path,
+        render3d_log_path=render3d_log_path,
     )
     return tab.root

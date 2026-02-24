@@ -42,6 +42,7 @@ class AppConfig:
     log_dir: Path = Path(".accloud") / "logs"
     app_log_path: Path = Path(".accloud") / "logs" / "accloud_app.log"
     http_log_path: Path = Path(".accloud") / "logs" / "accloud_http.log"
+    render3d_log_path: Path = Path(".accloud") / "logs" / "accloud_render3d.log"
     fault_log_path: Path = Path(".accloud") / "logs" / "accloud_fault.log"
     log_max_bytes: int = 10 * 1024 * 1024
     log_backups: int = 5
@@ -71,6 +72,12 @@ class AppConfig:
             os.getenv(
                 "ACCLOUD_HTTP_LOG_PATH",
                 str(log_dir / "accloud_http.log"),
+            )
+        )
+        render3d_log_path = Path(
+            os.getenv(
+                "ACCLOUD_RENDER3D_LOG_PATH",
+                str(log_dir / "accloud_render3d.log"),
             )
         )
         fault_log_path = Path(
@@ -125,6 +132,7 @@ class AppConfig:
             log_dir=log_dir,
             app_log_path=app_log_path,
             http_log_path=http_log_path,
+            render3d_log_path=render3d_log_path,
             fault_log_path=fault_log_path,
             log_max_bytes=log_max_bytes,
             log_backups=log_backups,

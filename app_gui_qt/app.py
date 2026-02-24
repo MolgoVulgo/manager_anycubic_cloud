@@ -60,6 +60,7 @@ def _configure_logging(config: AppConfig) -> None:
     queue_handler, listener = build_queue_listener(
         app_log_path=config.app_log_path,
         http_log_path=config.http_log_path,
+        render3d_log_path=config.render3d_log_path,
         app_level=app_level,
         http_level=http_level,
         max_bytes=config.log_max_bytes,
@@ -150,11 +151,13 @@ def _open_viewer_dialog(
     *,
     pwmb_path: Path | None = None,
     file_label: str | None = None,
+    resolve_pwmb_path=None,
 ) -> None:
     dialog = build_pwmb3d_dialog(
         owner,
         pwmb_path=pwmb_path,
         file_label=file_label,
+        resolve_pwmb_path=resolve_pwmb_path,
     )
     dialog.exec()
 
@@ -224,11 +227,12 @@ def _make_open_viewer_callback(
 ):
     def _open(file_item: FileItem | None = None) -> None:
         pwmb_path: Path | None = None
+        resolve_pwmb_path = None
         file_label: str | None = None
         if isinstance(file_item, FileItem):
             file_label = file_item.name or file_item.file_id
             if (file_item.name or "").lower().endswith(".pwmb"):
-                pwmb_path = _resolve_pwmb_path_for_viewer(
+                resolve_pwmb_path = lambda: _resolve_pwmb_path_for_viewer(
                     file_item=file_item,
                     api=api,
                     config=config,
@@ -238,6 +242,7 @@ def _make_open_viewer_callback(
             owner,
             pwmb_path=pwmb_path,
             file_label=file_label,
+            resolve_pwmb_path=resolve_pwmb_path,
         )
 
     return _open
@@ -1442,6 +1447,7 @@ def build_main_window(
             app_log_path=config.app_log_path,
             http_log_path=config.http_log_path,
             fault_log_path=config.fault_log_path,
+            render3d_log_path=config.render3d_log_path,
         ),
         "Log",
     )
