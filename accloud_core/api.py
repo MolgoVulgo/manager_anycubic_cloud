@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime, timezone
 import json
+import logging
 from pathlib import Path
 import re
 from typing import Any
@@ -10,8 +11,12 @@ from typing import Any
 from accloud_core.client import CloudHttpClient
 from accloud_core.endpoints import ENDPOINTS
 from accloud_core.errors import CloudApiError
+from accloud_core.logging_contract import emit_event, get_op_id
 from accloud_core.models import FileItem, GcodeInfo, Printer, Quota
 from accloud_core.utils import pick_first
+
+
+LOGGER = logging.getLogger("accloud.api")
 
 
 class AnycubicCloudApi:
@@ -20,13 +25,20 @@ class AnycubicCloudApi:
     def __init__(self, client: CloudHttpClient) -> None:
         self._client = client
 
-    def validate_session(self) -> dict[str, Any]:
+    def validate_session(self, *, op_id: str | None = None) -> dict[str, Any]:
         endpoint = ENDPOINTS["session_validate"]
-        payload = self._client.request_json(endpoint.method, endpoint.path, expected_status=(200, 201))
+        payload = _request_json(
+            self._client,
+            endpoint.method,
+            endpoint.path,
+            expected_status=(200, 201),
+            endpoint_name="session.validate",
+            op_id=op_id,
+        )
         data = _extract_data(payload)
         return dict(data)
 
-    def login_with_access_token(self, access_token: str) -> dict[str, Any]:
+    def login_with_access_token(self, access_token: str, *, op_id: str | None = None) -> dict[str, Any]:
         endpoint = ENDPOINTS["login_with_access_token"]
         attempts = (
             {"access_token": access_token, "device_type": "web"},
@@ -39,12 +51,21 @@ class AnycubicCloudApi:
             endpoint.path,
             payload_attempts=attempts,
             expected_status=(200, 201),
+            endpoint_name="auth.login_with_access_token",
+            op_id=op_id,
         )
         return dict(_extract_data(payload))
 
-    def get_quota(self) -> Quota:
+    def get_quota(self, *, op_id: str | None = None) -> Quota:
         endpoint = ENDPOINTS["quota"]
-        payload = self._client.request_json(endpoint.method, endpoint.path, expected_status=(200, 201))
+        payload = _request_json(
+            self._client,
+            endpoint.method,
+            endpoint.path,
+            expected_status=(200, 201),
+            endpoint_name="quota.get",
+            op_id=op_id,
+        )
         data = _extract_data(payload)
 
         total = _to_bytes(pick_first(data, "total_bytes", "totalSize", "total"), default=0)
@@ -58,7 +79,7 @@ class AnycubicCloudApi:
             used_percent = (used / total * 100.0) if total > 0 else 0.0
         return Quota(total_bytes=total, used_bytes=used, free_bytes=free, used_percent=used_percent)
 
-    def list_files(self, page: int = 1, page_size: int = 20) -> list[FileItem]:
+    def list_files(self, page: int = 1, page_size: int = 20, *, op_id: str | None = None) -> list[FileItem]:
         files_endpoint = ENDPOINTS["files"]
         files_alt_endpoint = ENDPOINTS["files_alt"]
         payload_attempts = (
@@ -72,6 +93,8 @@ class AnycubicCloudApi:
                 files_endpoint.path,
                 payload_attempts=payload_attempts,
                 expected_status=(200, 201),
+                endpoint_name="files.list",
+                op_id=op_id,
             )
         except CloudApiError:
             payload = _request_json_with_fallback(
@@ -80,6 +103,8 @@ class AnycubicCloudApi:
                 files_alt_endpoint.path,
                 payload_attempts=payload_attempts,
                 expected_status=(200, 201),
+                endpoint_name="files.list_alt",
+                op_id=op_id,
             )
         data = _extract_data(payload)
         raw_items = _extract_list(data)
@@ -213,19 +238,22 @@ class AnycubicCloudApi:
             )
         return files
 
-    def get_file_details(self, file_id: str) -> FileItem:
-        items = self.list_files(page=1, page_size=100)
+    def get_file_details(self, file_id: str, *, op_id: str | None = None) -> FileItem:
+        items = self.list_files(page=1, page_size=100, op_id=op_id)
         for item in items:
             if item.file_id == file_id:
                 return item
         raise CloudApiError(f"File not found in cloud listing: {file_id}")
 
-    def get_gcode_info(self, file_id: str) -> GcodeInfo:
+    def get_gcode_info(self, file_id: str, *, op_id: str | None = None) -> GcodeInfo:
         endpoint = ENDPOINTS["gcode_info"]
-        payload = self._client.request_json(
+        payload = _request_json(
+            self._client,
             endpoint.method,
             endpoint.path,
             expected_status=(200, 201),
+            endpoint_name="gcode.info",
+            op_id=op_id,
             params={"id": file_id},
         )
         data = _extract_data(payload)
@@ -236,7 +264,7 @@ class AnycubicCloudApi:
             extra={k: v for k, v in data.items()},
         )
 
-    def download_file(self, file_id: str, destination: str) -> None:
+    def download_file(self, file_id: str, destination: str, *, op_id: str | None = None) -> None:
         endpoint = ENDPOINTS["download"]
         normalized_id = str(file_id).strip()
         payload_attempts: list[Mapping[str, Any]] = []
@@ -258,6 +286,8 @@ class AnycubicCloudApi:
             endpoint.path,
             payload_attempts=tuple(payload_attempts),
             expected_status=(200, 201),
+            endpoint_name="files.download_url",
+            op_id=op_id,
         )
         try:
             _assert_success_payload(payload)
@@ -272,6 +302,7 @@ class AnycubicCloudApi:
                 signed_url,
                 expected_status=200,
                 include_session_headers=False,
+                op_id=_resolved_op_id(op_id),
             )
             try:
                 _write_bytes(Path(destination), signed_response.content)
@@ -280,7 +311,8 @@ class AnycubicCloudApi:
         except ValueError as exc:
             raise CloudApiError(f"Invalid download payload for file_id={file_id}") from exc
 
-    def upload_file(self, source_path: str) -> str:
+    def upload_file(self, source_path: str, *, op_id: str | None = None) -> str:
+        active_op_id = _resolved_op_id(op_id)
         source = Path(source_path)
         if not source.exists():
             raise FileNotFoundError(f"Source file not found: {source}")
@@ -302,6 +334,8 @@ class AnycubicCloudApi:
                 },
             ),
             expected_status=(200, 201),
+            endpoint_name="storage.lock",
+            op_id=active_op_id,
         )
         lock_data = _extract_data(lock_payload)
         signed_url = _to_optional_str(
@@ -318,6 +352,7 @@ class AnycubicCloudApi:
                     expected_status=(200, 201),
                     content=handle,
                     include_session_headers=False,
+                    op_id=active_op_id,
                 )
             upload_response.close()
 
@@ -329,6 +364,8 @@ class AnycubicCloudApi:
                     {"user_lock_space_id": pick_first(lock_data, "id", "lock_id")},
                 ),
                 expected_status=(200, 201),
+                endpoint_name="storage.register",
+                op_id=active_op_id,
             )
             register_data = _extract_data(register_payload)
         finally:
@@ -338,6 +375,7 @@ class AnycubicCloudApi:
                     unlock_endpoint.path,
                     expected_status=(200, 201),
                     json={"id": pick_first(lock_data, "id", "lock_id"), "is_delete_cos": 0},
+                    op_id=active_op_id,
                 ).close()
             except Exception:
                 # Unlock failures are non-fatal for the caller.
@@ -348,8 +386,9 @@ class AnycubicCloudApi:
             return file_id
         return source.name
 
-    def delete_file(self, file_id: str) -> None:
+    def delete_file(self, file_id: str, *, op_id: str | None = None) -> None:
         endpoint = ENDPOINTS["delete"]
+        active_op_id = _resolved_op_id(op_id)
         normalized_file_id = str(file_id).strip()
         if not normalized_file_id:
             raise CloudApiError("Cannot delete file without file_id.")
@@ -367,10 +406,17 @@ class AnycubicCloudApi:
                     endpoint.path,
                     expected_status=(200, 201, 202),
                     json=dict(payload),
+                    op_id=active_op_id,
+                )
+                _log_api_call(
+                    endpoint_name="files.delete",
+                    payload=response_payload,
+                    op_id=active_op_id,
                 )
                 _assert_success_payload(response_payload)
                 return
             except CloudApiError as exc:
+                _log_api_error(endpoint_name="files.delete", op_id=active_op_id, error=exc)
                 last_error = exc
                 continue
 
@@ -378,8 +424,9 @@ class AnycubicCloudApi:
             raise last_error
         raise CloudApiError("Delete file failed.")
 
-    def send_print_order(self, file_id: str, printer_id: str) -> None:
+    def send_print_order(self, file_id: str, printer_id: str, *, op_id: str | None = None) -> None:
         endpoint = ENDPOINTS["print_order"]
+        active_op_id = _resolved_op_id(op_id)
         normalized_file_id = str(file_id).strip()
         normalized_printer_id = str(printer_id).strip()
         if not normalized_file_id:
@@ -425,11 +472,18 @@ class AnycubicCloudApi:
                     endpoint.method,
                     endpoint.path,
                     expected_status=(200, 201, 202),
+                    op_id=active_op_id,
                     **request_kwargs,
+                )
+                _log_api_call(
+                    endpoint_name="print.send_order",
+                    payload=payload,
+                    op_id=active_op_id,
                 )
                 _assert_success_payload(payload)
                 return
             except CloudApiError as exc:
+                _log_api_error(endpoint_name="print.send_order", op_id=active_op_id, error=exc)
                 last_error = exc
                 continue
 
@@ -444,6 +498,7 @@ class AnycubicCloudApi:
         print_status: int | None = 1,
         page: int = 1,
         limit: int = 1,
+        op_id: str | None = None,
     ) -> list[dict[str, Any]]:
         endpoint = ENDPOINTS["projects"]
         normalized_printer_id = str(printer_id).strip()
@@ -457,10 +512,13 @@ class AnycubicCloudApi:
         }
         if print_status is not None:
             params["print_status"] = int(print_status)
-        payload = self._client.request_json(
+        payload = _request_json(
+            self._client,
             endpoint.method,
             endpoint.path,
             expected_status=(200, 201),
+            endpoint_name="projects.list",
+            op_id=op_id,
             params=params,
         )
         data = _extract_data(payload)
@@ -473,9 +531,16 @@ class AnycubicCloudApi:
             output.append(dict(item_map))
         return output
 
-    def list_printers(self) -> list[Printer]:
+    def list_printers(self, *, op_id: str | None = None) -> list[Printer]:
         endpoint = ENDPOINTS["printers"]
-        payload = self._client.request_json(endpoint.method, endpoint.path, expected_status=(200, 201))
+        payload = _request_json(
+            self._client,
+            endpoint.method,
+            endpoint.path,
+            expected_status=(200, 201),
+            endpoint_name="printers.list",
+            op_id=op_id,
+        )
         data = _extract_data(payload)
         raw_items = _extract_list(data)
         printers: list[Printer] = []
@@ -933,14 +998,20 @@ def _request_json_with_fallback(
     *,
     payload_attempts: tuple[Mapping[str, Any], ...],
     expected_status: int | tuple[int, ...],
+    endpoint_name: str,
+    op_id: str | None = None,
 ) -> dict[str, Any]:
+    active_op_id = _resolved_op_id(op_id)
     last_error: Exception | None = None
     for payload in payload_attempts:
         try:
-            return client.request_json(
+            return _request_json(
+                client,
                 method,
                 path,
                 expected_status=expected_status,
+                endpoint_name=endpoint_name,
+                op_id=active_op_id,
                 json=dict(payload),
             )
         except CloudApiError as exc:
@@ -948,4 +1019,99 @@ def _request_json_with_fallback(
             continue
     if last_error is not None:
         raise last_error
-    return client.request_json(method, path, expected_status=expected_status)
+    return _request_json(
+        client,
+        method,
+        path,
+        expected_status=expected_status,
+        endpoint_name=endpoint_name,
+        op_id=active_op_id,
+    )
+
+
+def _request_json(
+    client: CloudHttpClient,
+    method: str,
+    path: str,
+    *,
+    expected_status: int | tuple[int, ...],
+    endpoint_name: str,
+    op_id: str | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    active_op_id = _resolved_op_id(op_id)
+    try:
+        payload = client.request_json(
+            method,
+            path,
+            expected_status=expected_status,
+            op_id=active_op_id,
+            **kwargs,
+        )
+    except CloudApiError as exc:
+        _log_api_error(endpoint_name=endpoint_name, op_id=active_op_id, error=exc)
+        raise
+
+    _log_api_call(endpoint_name=endpoint_name, payload=payload, op_id=active_op_id)
+    return payload
+
+
+def _resolved_op_id(op_id: str | None) -> str:
+    value = str(op_id).strip() if op_id else ""
+    if value:
+        return value
+    return get_op_id()
+
+
+def _log_api_call(*, endpoint_name: str, payload: Mapping[str, Any], op_id: str) -> None:
+    code = _payload_code(payload)
+    if code is None or code == 1:
+        emit_event(
+            LOGGER,
+            logging.INFO,
+            event="api.call_ok",
+            msg="Cloud API call succeeded",
+            component="accloud.api",
+            op_id=op_id,
+            data={"accloud": {"endpoint": endpoint_name, "code": code}},
+        )
+        return
+
+    emit_event(
+        LOGGER,
+        logging.WARNING,
+        event="api.call_fail",
+        msg="Cloud API call returned non-success code",
+        component="accloud.api",
+        op_id=op_id,
+        data={
+            "accloud": {
+                "endpoint": endpoint_name,
+                "code": code,
+                "msg_api": _to_optional_str(pick_first(payload, "msg", "message", "error")),
+            }
+        },
+    )
+
+
+def _log_api_error(*, endpoint_name: str, op_id: str, error: Exception) -> None:
+    emit_event(
+        LOGGER,
+        logging.WARNING,
+        event="api.call_fail",
+        msg="Cloud API call failed",
+        component="accloud.api",
+        op_id=op_id,
+        data={"accloud": {"endpoint": endpoint_name}},
+        error={"type": type(error).__name__, "message": str(error)},
+    )
+
+
+def _payload_code(payload: Mapping[str, Any]) -> int | None:
+    if "code" not in payload:
+        return None
+    raw = payload.get("code")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None

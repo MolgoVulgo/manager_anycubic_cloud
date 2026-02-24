@@ -14,6 +14,7 @@ import httpx
 
 from accloud_core.config import AppConfig
 from accloud_core.errors import CloudApiError, CloudTransportError
+from accloud_core.logging_contract import emit_event, get_op_id
 from accloud_core.models import SessionData
 from accloud_core.utils import (
     backoff_seconds,
@@ -22,6 +23,7 @@ from accloud_core.utils import (
     redact_mapping,
     safe_url_for_log,
     truncate_text,
+    url_log_parts,
 )
 
 
@@ -41,7 +43,7 @@ class CloudHttpClient:
     ) -> None:
         self._config = config
         self._session_data = session_data or SessionData()
-        self._logger = logger or logging.getLogger("accloud_core.http")
+        self._logger = logger or logging.getLogger("accloud.http")
         self._auth_recovery_lock = threading.Lock()
 
         self._client = httpx.Client(
@@ -81,10 +83,13 @@ class CloudHttpClient:
         headers: Mapping[str, str] | None = None,
         expected_status: int | tuple[int, ...] | None = None,
         include_session_headers: bool = True,
+        op_id: str | None = None,
         **kwargs: Any,
     ) -> httpx.Response:
+        active_op_id = str(op_id).strip() or get_op_id()
         safe_url = safe_url_for_log(url)
         safe_json = self._safe_json_payload(kwargs.get("json"))
+        safe_url_parts = url_log_parts(url)
 
         attempt = 0
         last_error: Exception | None = None
@@ -99,15 +104,30 @@ class CloudHttpClient:
             )
             request_id = request_headers.get("X-Request-Id", "")
             safe_headers = redact_mapping(request_headers)
-            self._logger.debug(
-                "HTTP request method=%s url=%s attempt=%s/%s request_id=%s headers=%s json=%s",
-                method,
-                safe_url,
-                attempt + 1,
-                max_attempts,
-                request_id,
-                safe_headers,
-                safe_json,
+            http_context = {
+                "method": method.upper(),
+                "url_base": safe_url_parts.get("url_base", safe_url),
+                "query_keys": safe_url_parts.get("query_keys", []),
+                "attempt": attempt + 1,
+                "timeout_s": self._config.timeout_s,
+            }
+            query_hash = safe_url_parts.get("url.query_hash")
+            if isinstance(query_hash, str) and query_hash:
+                http_context["query_hash"] = query_hash
+            bytes_out = self._estimate_request_bytes(kwargs)
+            if bytes_out is not None:
+                http_context["bytes_out"] = bytes_out
+
+            emit_event(
+                self._logger,
+                logging.INFO,
+                event="http.request",
+                msg="HTTP request",
+                component="accloud.http",
+                op_id=active_op_id,
+                req_id=request_id,
+                data={"headers": safe_headers, "json": safe_json},
+                http=http_context,
             )
             start_s = time.perf_counter()
             try:
@@ -115,26 +135,72 @@ class CloudHttpClient:
             except httpx.TimeoutException as exc:
                 last_error = exc
                 if attempt >= max_attempts - 1:
+                    emit_event(
+                        self._logger,
+                        logging.ERROR,
+                        event="http.error",
+                        msg="HTTP timeout",
+                        component="accloud.http",
+                        op_id=active_op_id,
+                        req_id=request_id,
+                        http=http_context,
+                        error={"type": type(exc).__name__, "message": str(exc)},
+                    )
                     raise CloudTransportError(f"Timeout during {method} {safe_url}") from exc
-                self._sleep_before_retry(method, safe_url, attempt, reason="timeout")
+                self._sleep_before_retry(
+                    method=method,
+                    url_parts=safe_url_parts,
+                    attempt=attempt,
+                    reason="timeout",
+                    op_id=active_op_id,
+                    req_id=request_id,
+                )
                 attempt += 1
                 continue
             except httpx.TransportError as exc:
                 last_error = exc
                 if attempt >= max_attempts - 1:
+                    emit_event(
+                        self._logger,
+                        logging.ERROR,
+                        event="http.error",
+                        msg="HTTP transport error",
+                        component="accloud.http",
+                        op_id=active_op_id,
+                        req_id=request_id,
+                        http=http_context,
+                        error={"type": type(exc).__name__, "message": str(exc)},
+                    )
                     raise CloudTransportError(f"Transport error during {method} {safe_url}") from exc
-                self._sleep_before_retry(method, safe_url, attempt, reason="transport")
+                self._sleep_before_retry(
+                    method=method,
+                    url_parts=safe_url_parts,
+                    attempt=attempt,
+                    reason="transport",
+                    op_id=active_op_id,
+                    req_id=request_id,
+                )
                 attempt += 1
                 continue
 
             elapsed_ms = (time.perf_counter() - start_s) * 1000.0
-            self._logger.info(
-                "HTTP response method=%s url=%s request_id=%s status=%s elapsed_ms=%.2f",
-                method,
-                safe_url,
-                request_id,
-                response.status_code,
-                elapsed_ms,
+            bytes_in = self._estimate_response_bytes(response)
+            response_http_context = {
+                **http_context,
+                "status": response.status_code,
+            }
+            if bytes_in is not None:
+                response_http_context["bytes_in"] = bytes_in
+            emit_event(
+                self._logger,
+                logging.INFO,
+                event="http.response",
+                msg="HTTP response",
+                component="accloud.http",
+                op_id=active_op_id,
+                req_id=request_id,
+                duration_ms=elapsed_ms,
+                http=response_http_context,
             )
 
             if (
@@ -150,30 +216,51 @@ class CloudHttpClient:
                     trigger_method=method,
                     trigger_url=url,
                     trigger_status=response.status_code,
+                    op_id=active_op_id,
+                    req_id=request_id,
                 ):
                     auth_recovery_attempted = True
                     continue
+                emit_event(
+                    self._logger,
+                    logging.ERROR,
+                    event="http.error",
+                    msg="Authentication recovery failed",
+                    component="accloud.http",
+                    op_id=active_op_id,
+                    req_id=request_id,
+                    http=response_http_context,
+                )
                 raise CloudApiError(
                     f"Authentication failed for {method} {safe_url}: {response.status_code}",
                     status_code=response.status_code,
                 )
 
             if is_retryable_status(response.status_code) and attempt < max_attempts - 1:
-                self._sleep_before_retry(method, safe_url, attempt, reason=f"status={response.status_code}")
+                self._sleep_before_retry(
+                    method=method,
+                    url_parts=safe_url_parts,
+                    attempt=attempt,
+                    reason=f"status={response.status_code}",
+                    op_id=active_op_id,
+                    req_id=request_id,
+                )
                 response.close()
                 attempt += 1
                 continue
 
             if expected_status is not None and not self._status_matches(response.status_code, expected_status):
                 response_text = truncate_text(response.text, max_len=1200)
-                self._logger.error(
-                    "HTTP unexpected-status method=%s url=%s request_id=%s expected=%s got=%s body=%s",
-                    method,
-                    safe_url,
-                    request_id,
-                    expected_status,
-                    response.status_code,
-                    response_text,
+                emit_event(
+                    self._logger,
+                    logging.ERROR,
+                    event="http.error",
+                    msg="HTTP unexpected status",
+                    component="accloud.http",
+                    op_id=active_op_id,
+                    req_id=request_id,
+                    data={"expected_status": expected_status, "body": response_text},
+                    http=response_http_context,
                 )
                 raise CloudApiError(
                     f"Unexpected status for {method} {safe_url}: {response.status_code}",
@@ -182,6 +269,19 @@ class CloudHttpClient:
 
             return response
 
+        emit_event(
+            self._logger,
+            logging.ERROR,
+            event="http.error",
+            msg="Retry budget exhausted",
+            component="accloud.http",
+            op_id=active_op_id,
+            http={
+                "method": method.upper(),
+                "url_base": safe_url_parts.get("url_base", safe_url),
+                "query_keys": safe_url_parts.get("query_keys", []),
+            },
+        )
         raise CloudTransportError(f"Retry budget exhausted for {method} {safe_url}") from last_error
 
     def request_json(
@@ -190,18 +290,40 @@ class CloudHttpClient:
         url: str,
         *,
         expected_status: int | tuple[int, ...] = 200,
+        op_id: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        active_op_id = str(op_id).strip() or get_op_id()
+        safe_url_parts = url_log_parts(url)
         response = self.request(
             method,
             url,
             expected_status=expected_status,
+            op_id=active_op_id,
             **kwargs,
         )
         try:
             payload = response.json()
         except json.JSONDecodeError as exc:
             text = truncate_text(response.text, max_len=1000)
+            req_id = response.request.headers.get("X-Request-Id", "")
+            emit_event(
+                self._logger,
+                logging.ERROR,
+                event="http.error",
+                msg="HTTP invalid JSON response",
+                component="accloud.http",
+                op_id=active_op_id,
+                req_id=req_id,
+                data={"body": text},
+                http={
+                    "method": method.upper(),
+                    "url_base": safe_url_parts.get("url_base", safe_url_for_log(url)),
+                    "query_keys": safe_url_parts.get("query_keys", []),
+                    "status": response.status_code,
+                },
+                error={"type": type(exc).__name__, "message": str(exc)},
+            )
             raise CloudApiError(
                 f"Invalid JSON response for {method} {safe_url_for_log(url)}: {text}",
                 status_code=response.status_code,
@@ -213,6 +335,21 @@ class CloudHttpClient:
             return payload
         if isinstance(payload, list):
             return {"data": payload}
+        emit_event(
+            self._logger,
+            logging.ERROR,
+            event="http.error",
+            msg="HTTP unexpected JSON shape",
+            component="accloud.http",
+            op_id=active_op_id,
+            data={"shape": type(payload).__name__},
+            http={
+                "method": method.upper(),
+                "url_base": safe_url_parts.get("url_base", safe_url_for_log(url)),
+                "query_keys": safe_url_parts.get("query_keys", []),
+                "status": response.status_code,
+            },
+        )
         raise CloudApiError(
             f"Unexpected JSON shape for {method} {safe_url_for_log(url)}: {type(payload).__name__}",
             status_code=response.status_code,
@@ -302,6 +439,29 @@ class CloudHttpClient:
             return None
         return redact_json_like(payload)
 
+    @staticmethod
+    def _estimate_request_bytes(kwargs: Mapping[str, Any]) -> int | None:
+        json_payload = kwargs.get("json")
+        if json_payload is not None:
+            try:
+                return len(json.dumps(json_payload, ensure_ascii=True, default=str).encode("utf-8"))
+            except (TypeError, ValueError):
+                return None
+
+        content = kwargs.get("content")
+        if isinstance(content, (bytes, bytearray)):
+            return len(content)
+        if isinstance(content, str):
+            return len(content.encode("utf-8"))
+        return None
+
+    @staticmethod
+    def _estimate_response_bytes(response: httpx.Response) -> int | None:
+        content_length = response.headers.get("Content-Length")
+        if content_length and str(content_length).strip().isdigit():
+            return int(str(content_length).strip())
+        return None
+
     def _should_attempt_auth_recovery(self, *, url: str, method: str, already_attempted: bool) -> bool:
         _ = method
         if already_attempted:
@@ -313,45 +473,80 @@ class CloudHttpClient:
             return False
         return bool(self._auth_recovery_candidates())
 
-    def _attempt_auth_recovery(self, *, trigger_method: str, trigger_url: str, trigger_status: int) -> bool:
-        safe_trigger_url = safe_url_for_log(trigger_url)
+    def _attempt_auth_recovery(
+        self,
+        *,
+        trigger_method: str,
+        trigger_url: str,
+        trigger_status: int,
+        op_id: str,
+        req_id: str | None,
+    ) -> bool:
+        safe_trigger_url_parts = url_log_parts(trigger_url)
+        trigger_http_context = {
+            "method": trigger_method.upper(),
+            "url_base": safe_trigger_url_parts.get("url_base", safe_url_for_log(trigger_url)),
+            "query_keys": safe_trigger_url_parts.get("query_keys", []),
+            "status": trigger_status,
+        }
         with self._auth_recovery_lock:
             candidates = self._auth_recovery_candidates()
             if not candidates:
-                self._logger.warning(
-                    "HTTP auth-recovery skipped method=%s url=%s status=%s reason=no-candidates",
-                    trigger_method,
-                    safe_trigger_url,
-                    trigger_status,
+                emit_event(
+                    self._logger,
+                    logging.WARNING,
+                    event="http.retry",
+                    msg="HTTP auth recovery skipped",
+                    component="accloud.http",
+                    op_id=op_id,
+                    req_id=req_id,
+                    data={"reason": "no-candidates"},
+                    http=trigger_http_context,
                 )
                 return False
 
-            self._logger.warning(
-                "HTTP auth-recovery start method=%s url=%s status=%s candidates=%s",
-                trigger_method,
-                safe_trigger_url,
-                trigger_status,
-                len(candidates),
+            emit_event(
+                self._logger,
+                logging.WARNING,
+                event="http.retry",
+                msg="HTTP auth recovery started",
+                component="accloud.http",
+                op_id=op_id,
+                req_id=req_id,
+                data={"candidates": len(candidates)},
+                http=trigger_http_context,
             )
 
             for candidate in candidates:
-                recovered_tokens = self._login_with_access_token(candidate)
+                recovered_tokens = self._login_with_access_token(
+                    candidate,
+                    op_id=op_id,
+                    req_id=req_id,
+                )
                 if recovered_tokens is None:
                     continue
                 self.update_session(SessionData(tokens=self._merge_session_tokens(recovered_tokens)))
-                self._logger.info(
-                    "HTTP auth-recovery success method=%s url=%s status=%s",
-                    trigger_method,
-                    safe_trigger_url,
-                    trigger_status,
+                emit_event(
+                    self._logger,
+                    logging.INFO,
+                    event="http.response",
+                    msg="HTTP auth recovery succeeded",
+                    component="accloud.http",
+                    op_id=op_id,
+                    req_id=req_id,
+                    http=trigger_http_context,
                 )
                 return True
 
-            self._logger.error(
-                "HTTP auth-recovery failed method=%s url=%s status=%s",
-                trigger_method,
-                safe_trigger_url,
-                trigger_status,
+            emit_event(
+                self._logger,
+                logging.ERROR,
+                event="http.error",
+                msg="HTTP auth recovery failed",
+                component="accloud.http",
+                op_id=op_id,
+                req_id=req_id,
+                http=trigger_http_context,
             )
             return False
 
@@ -373,26 +568,45 @@ class CloudHttpClient:
             selected.append(normalized)
         return selected
 
-    def _login_with_access_token(self, access_token: str) -> dict[str, str] | None:
+    def _login_with_access_token(
+        self,
+        access_token: str,
+        *,
+        op_id: str,
+        req_id: str | None,
+    ) -> dict[str, str] | None:
         attempts = (
             {"access_token": access_token, "device_type": "web"},
             {"accessToken": access_token, "device_type": "web"},
             {"accessToken": access_token},
         )
+        safe_url_parts = url_log_parts(LOGIN_WITH_ACCESS_TOKEN_PATH)
 
         for payload in attempts:
             headers = self._build_headers(url=LOGIN_WITH_ACCESS_TOKEN_PATH, headers=None)
             request_id = headers.get("X-Request-Id", "")
             safe_headers = redact_mapping(headers)
             safe_payload = self._safe_json_payload(payload)
+            http_context = {
+                "method": "POST",
+                "url_base": safe_url_parts.get("url_base", LOGIN_WITH_ACCESS_TOKEN_PATH),
+                "query_keys": safe_url_parts.get("query_keys", []),
+                "attempt": 1,
+                "timeout_s": self._config.timeout_s,
+            }
             try:
-                self._logger.debug(
-                    "HTTP auth-recovery request method=POST url=%s request_id=%s headers=%s json=%s",
-                    LOGIN_WITH_ACCESS_TOKEN_PATH,
-                    request_id,
-                    safe_headers,
-                    safe_payload,
+                emit_event(
+                    self._logger,
+                    logging.INFO,
+                    event="http.request",
+                    msg="HTTP auth recovery request",
+                    component="accloud.http",
+                    op_id=op_id,
+                    req_id=request_id,
+                    data={"headers": safe_headers, "json": safe_payload, "trigger_req_id": req_id},
+                    http=http_context,
                 )
+                start_s = time.perf_counter()
                 response = self._client.request(
                     "POST",
                     LOGIN_WITH_ACCESS_TOKEN_PATH,
@@ -400,10 +614,36 @@ class CloudHttpClient:
                     json=payload,
                 )
             except httpx.TransportError as exc:
-                self._logger.warning("HTTP auth-recovery transport error: %s", exc)
+                emit_event(
+                    self._logger,
+                    logging.WARNING,
+                    event="http.retry",
+                    msg="HTTP auth recovery transport error",
+                    component="accloud.http",
+                    op_id=op_id,
+                    req_id=request_id,
+                    http=http_context,
+                    error={"type": type(exc).__name__, "message": str(exc)},
+                )
                 continue
 
             try:
+                elapsed_ms = (time.perf_counter() - start_s) * 1000.0
+                emit_event(
+                    self._logger,
+                    logging.INFO,
+                    event="http.response",
+                    msg="HTTP auth recovery response",
+                    component="accloud.http",
+                    op_id=op_id,
+                    req_id=request_id,
+                    duration_ms=elapsed_ms,
+                    http={
+                        **http_context,
+                        "status": response.status_code,
+                        "bytes_in": self._estimate_response_bytes(response),
+                    },
+                )
                 if response.status_code not in {200, 201}:
                     continue
                 try:
@@ -504,19 +744,37 @@ class CloudHttpClient:
             return raw[7:].strip()
         return raw
 
-    def _sleep_before_retry(self, method: str, safe_url: str, attempt: int, reason: str) -> None:
+    def _sleep_before_retry(
+        self,
+        *,
+        method: str,
+        url_parts: Mapping[str, Any],
+        attempt: int,
+        reason: str,
+        op_id: str,
+        req_id: str | None,
+    ) -> None:
         delay_s = backoff_seconds(
             attempt=attempt,
             base_delay_s=self._config.retry.base_delay_s,
             max_delay_s=self._config.retry.max_delay_s,
         )
-        self._logger.warning(
-            "HTTP retry method=%s url=%s attempt=%s/%s reason=%s delay_s=%.2f",
-            method,
-            safe_url,
-            attempt + 1,
-            self._config.retry.max_attempts,
-            reason,
-            delay_s,
+        emit_event(
+            self._logger,
+            logging.WARNING,
+            event="http.retry",
+            msg="HTTP retry scheduled",
+            component="accloud.http",
+            op_id=op_id,
+            req_id=req_id,
+            data={"reason": reason},
+            http={
+                "method": method.upper(),
+                "url_base": url_parts.get("url_base"),
+                "query_keys": url_parts.get("query_keys", []),
+                "attempt": attempt + 1,
+                "timeout_s": self._config.timeout_s,
+            },
+            duration_ms=delay_s * 1000.0,
         )
         time.sleep(delay_s)
