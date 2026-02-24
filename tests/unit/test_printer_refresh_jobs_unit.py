@@ -13,7 +13,8 @@ class _FakeApi:
     def __init__(self) -> None:
         self.project_calls: list[tuple[str, int | None]] = []
 
-    def list_printers(self) -> list[Printer]:
+    def list_printers(self, *, op_id: str | None = None) -> list[Printer]:
+        _ = op_id
         return [
             Printer(
                 printer_id="42859",
@@ -38,8 +39,9 @@ class _FakeApi:
         print_status: int | None = 1,
         page: int = 1,
         limit: int = 1,
+        op_id: str | None = None,
     ) -> list[dict[str, object]]:
-        _ = (print_status, page, limit)
+        _ = (print_status, page, limit, op_id)
         self.project_calls.append((printer_id, print_status))
         if printer_id != "42859":
             return []
@@ -63,7 +65,8 @@ class _FallbackProjectApi:
     def __init__(self) -> None:
         self.project_calls: list[tuple[str, int | None]] = []
 
-    def list_printers(self) -> list[Printer]:
+    def list_printers(self, *, op_id: str | None = None) -> list[Printer]:
+        _ = op_id
         return [
             Printer(
                 printer_id="42859",
@@ -89,8 +92,9 @@ class _FallbackProjectApi:
         print_status: int | None = 1,
         page: int = 1,
         limit: int = 1,
+        op_id: str | None = None,
     ) -> list[dict[str, object]]:
-        _ = (page, limit)
+        _ = (page, limit, op_id)
         self.project_calls.append((printer_id, print_status))
         if print_status == 1:
             return []

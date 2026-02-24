@@ -1,15 +1,29 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hashlib
 import math
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any
 
 
-SENSITIVE_HEADER_NAMES = {
+_SENSITIVE_EXACT_KEYS = {
+    "token",
+    "access_token",
     "authorization",
     "cookie",
     "set-cookie",
+    "secret",
+    "signature",
+    "nonce",
+    "timestamp",
+    "password",
+    "email",
+    "phone",
+    "user_id",
+    "refresh",
+    "refresh_token",
+    "authorization",
     "x-access-token",
     "x-auth-token",
     "xx-token",
@@ -18,28 +32,26 @@ SENSITIVE_HEADER_NAMES = {
     "xx-timestamp",
 }
 
-SENSITIVE_JSON_KEYS = {
-    "access_token",
+_SENSITIVE_KEY_PARTS = (
+    "token",
     "authorization",
     "cookie",
-    "password",
-    "refresh_token",
+    "set-cookie",
     "secret",
     "signature",
-    "token",
-}
-
-SENSITIVE_KEY_PARTS = (
-    "token",
-    "signature",
     "nonce",
+    "timestamp",
+    "password",
+    "email",
+    "phone",
+    "user_id",
+    "refresh",
 )
 
 
 def redact_value(value: Any) -> str:
-    if value is None:
-        return "<redacted:none>"
-    return "<redacted>"
+    _ = value
+    return "[REDACTED]"
 
 
 def redact_mapping(values: Mapping[str, Any]) -> dict[str, Any]:
@@ -94,7 +106,7 @@ def safe_url_for_log(url: str) -> str:
     safe_query = []
     for key, value in parse_qsl(parsed.query, keep_blank_values=True):
         if is_sensitive_key(key):
-            safe_query.append((key, "<redacted>"))
+            safe_query.append((key, "[REDACTED]"))
         else:
             safe_query.append((key, value))
     return urlunparse(parsed._replace(query=urlencode(safe_query)))
@@ -104,9 +116,28 @@ def is_sensitive_key(key: str) -> bool:
     normalized = key.strip().lower()
     if not normalized:
         return False
-    if normalized in SENSITIVE_HEADER_NAMES or normalized in SENSITIVE_JSON_KEYS:
+    if normalized in _SENSITIVE_EXACT_KEYS:
         return True
-    return any(fragment in normalized for fragment in SENSITIVE_KEY_PARTS)
+    return any(fragment in normalized for fragment in _SENSITIVE_KEY_PARTS)
+
+
+def url_log_parts(url: str) -> dict[str, Any]:
+    parsed = urlparse(url)
+    query = parsed.query
+    query_keys = sorted({key for key, _value in parse_qsl(query, keep_blank_values=True)})
+
+    if parsed.scheme and parsed.netloc:
+        url_base = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+    else:
+        url_base = str(url).split("?", 1)[0]
+
+    payload: dict[str, Any] = {
+        "url_base": url_base,
+        "query_keys": query_keys,
+    }
+    if query:
+        payload["url.query_hash"] = hashlib.sha256(query.encode("utf-8")).hexdigest()
+    return payload
 
 
 def format_bytes(num_bytes: int) -> str:
