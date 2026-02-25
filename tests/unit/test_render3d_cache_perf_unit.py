@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 
 from app_gui_qt.dialogs.pwmb3d_dialog import (
+    _QUALITY_PRESETS,
+    _RENDER_PALETTES,
     _camera_pose_for_orbit,
+    _pan_center_for_drag,
+    _quality_ratio_from_index,
+    _sample_layers_by_ratio,
     _select_preview_xy_stride,
     _select_preview_xy_stride_for_complexity,
     _select_preview_z_stride,
@@ -194,3 +199,51 @@ def test_camera_pose_for_orbit_returns_normalized_forward_vector() -> None:
     )
     norm = (forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2]) ** 0.5
     assert norm == pytest.approx(1.0, rel=1e-6)
+
+
+def test_pan_center_for_drag_moves_center_with_right_drag() -> None:
+    center = (0.0, 0.0, 0.0)
+    moved_right = _pan_center_for_drag(
+        center=center,
+        distance=10.0,
+        yaw_deg=0.0,
+        pitch_deg=0.0,
+        dx_px=20.0,
+        dy_px=0.0,
+    )
+    moved_up = _pan_center_for_drag(
+        center=center,
+        distance=10.0,
+        yaw_deg=0.0,
+        pitch_deg=0.0,
+        dx_px=0.0,
+        dy_px=-20.0,
+    )
+    assert moved_right[0] < center[0]
+    assert moved_up[1] < center[1]
+
+
+def test_render_palette_presets_expose_expected_choices() -> None:
+    assert len(_RENDER_PALETTES) == 6
+    assert len({palette.label for palette in _RENDER_PALETTES}) == 6
+    assert any(palette.label == "Light Gray Cyan" for palette in _RENDER_PALETTES)
+
+
+def test_quality_presets_are_100_66_33() -> None:
+    labels = [label for label, _ratio in _QUALITY_PRESETS]
+    ratios = [ratio for _label, ratio in _QUALITY_PRESETS]
+    assert labels == ["Qualite max (100%)", "Qualite intermediaire (66%)", "Qualite basse (33%)"]
+    assert ratios == [1.0, 0.66, 0.33]
+    assert _quality_ratio_from_index(0) == pytest.approx(1.0, rel=1e-6)
+    assert _quality_ratio_from_index(1) == pytest.approx(0.66, rel=1e-6)
+    assert _quality_ratio_from_index(2) == pytest.approx(0.33, rel=1e-6)
+
+
+def test_sample_layers_by_ratio_keeps_expected_density() -> None:
+    layers = list(range(12))
+    full = _sample_layers_by_ratio(layers, 1.0)
+    medium = _sample_layers_by_ratio(layers, 0.66)
+    low = _sample_layers_by_ratio(layers, 0.33)
+    assert len(full) == 12
+    assert len(medium) == 8
+    assert len(low) == 4

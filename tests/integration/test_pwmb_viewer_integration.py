@@ -47,6 +47,13 @@ def _slider(dialog: QtWidgets.QDialog, *, minimum: int) -> QtWidgets.QSlider:
     raise AssertionError(f"Slider with minimum={minimum} not found")
 
 
+def _combo_with_items(dialog: QtWidgets.QDialog, *, count: int) -> QtWidgets.QComboBox:
+    for item in dialog.findChildren(QtWidgets.QComboBox):
+        if int(item.count()) == int(count):
+            return item
+    raise AssertionError(f"ComboBox with {count} items not found")
+
+
 def _first_label_containing(dialog: QtWidgets.QDialog, needle: str) -> QtWidgets.QLabel:
     for label in dialog.findChildren(QtWidgets.QLabel):
         if needle in label.text():
@@ -94,6 +101,7 @@ class _FakeViewport(QtWidgets.QWidget):
         self.last_stride = 1
         self.force_full = False
         self.contour_only = False
+        self.palette_label = ""
         self._renderer_error: str | None = None
 
     def set_geometry(self, geometry: PwmbContourGeometry, *, layer_ids: list[int]) -> None:
@@ -111,6 +119,9 @@ class _FakeViewport(QtWidgets.QWidget):
     def set_contour_only(self, enabled: bool) -> None:
         self.contour_only = bool(enabled)
 
+    def set_render_palette(self, label: str) -> None:
+        self.palette_label = str(label)
+
     def reset_camera(self) -> None:
         return None
 
@@ -119,13 +130,13 @@ class _FakeViewport(QtWidgets.QWidget):
 
 
 def test_viewer_dialog_build_async_updates_ranges_and_controls(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _ = _app()
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    _ = _app()
     sample = tmp_path / "sample.pwmb"
     sample.write_bytes(b"pwmb")
 
     viewports: list[_FakeViewport] = []
-    calls: list[tuple[str, bool]] = []
+    calls: list[tuple[str, bool, float]] = []
 
     def _fake_make_viewport(parent=None):
         viewport = _FakeViewport(parent=parent)
@@ -133,7 +144,7 @@ def test_viewer_dialog_build_async_updates_ranges_and_controls(monkeypatch: pyte
         return viewport, _FakeViewport
 
     def _fake_build_job(*, source_path: str, phase: str, include_fill: bool, **_kwargs):
-        calls.append((phase, include_fill))
+        calls.append((phase, include_fill, float(_kwargs.get("quality_ratio", 0.0))))
         return _make_result(source_path=source_path, phase=phase, include_fill=include_fill)
 
     monkeypatch.setattr(dialog_mod, "_make_viewport", _fake_make_viewport)
@@ -143,29 +154,42 @@ def test_viewer_dialog_build_async_updates_ranges_and_controls(monkeypatch: pyte
     dialog.show()
     try:
         _wait_until(lambda: any(label.text().startswith("Loaded ") for label in dialog.findChildren(QtWidgets.QLabel)))
-        assert calls == [("contours", False), ("fill", True)]
+        assert calls[0][0:2] == ("contours", False)
+        assert calls[1][0:2] == ("fill", True)
+        assert calls[0][2] == pytest.approx(0.66, rel=1e-6)
+        assert calls[1][2] == pytest.approx(0.66, rel=1e-6)
         assert len(viewports) == 1
         assert len(viewports[0].geometry_calls) == 2
 
         cutoff_slider = _slider(dialog, minimum=0)
-        stride_slider = _slider(dialog, minimum=1)
+        quality_combo = _combo_with_items(dialog, count=len(dialog_mod._QUALITY_PRESETS))
+        palette_combo = _combo_with_items(dialog, count=len(dialog_mod._RENDER_PALETTES))
         assert cutoff_slider.maximum() == 2
         assert cutoff_slider.value() == 2
 
         cutoff_slider.setValue(1)
-        stride_slider.setValue(2)
+        quality_combo.setCurrentIndex(2)
+        palette_combo.setCurrentIndex(2)
         _app().processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 50)
         assert viewports[0].last_cutoff == 1
-        assert viewports[0].last_stride == 2
+        assert viewports[0].palette_label == palette_combo.currentText()
         assert _first_label_containing(dialog, "L1 / 2").text() == "L1 / 2"
+
+        rebuild_btn = _button(dialog, "Rebuild preview")
+        rebuild_btn.click()
+        _wait_until(lambda: len(calls) >= 4)
+        assert calls[2][0:2] == ("contours", False)
+        assert calls[3][0:2] == ("fill", True)
+        assert calls[2][2] == pytest.approx(0.33, rel=1e-6)
+        assert calls[3][2] == pytest.approx(0.33, rel=1e-6)
     finally:
         dialog.reject()
         _app().processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 50)
 
 
 def test_viewer_dialog_parse_error_enables_retry_and_retry_succeeds(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _ = _app()
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    _ = _app()
     sample = tmp_path / "sample_retry.pwmb"
     sample.write_bytes(b"pwmb")
 
@@ -201,8 +225,8 @@ def test_viewer_dialog_parse_error_enables_retry_and_retry_succeeds(monkeypatch:
 
 
 def test_viewer_dialog_renderer_failure_surfaces_retry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _ = _app()
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    _ = _app()
     sample = tmp_path / "sample_gl_fail.pwmb"
     sample.write_bytes(b"pwmb")
 

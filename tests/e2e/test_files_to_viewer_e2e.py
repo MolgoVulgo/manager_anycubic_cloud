@@ -45,6 +45,9 @@ class _FakeViewport(QtWidgets.QWidget):
     def set_contour_only(self, enabled: bool) -> None:
         _ = enabled
 
+    def set_render_palette(self, label: str) -> None:
+        _ = label
+
     def reset_camera(self) -> None:
         return None
 
@@ -82,6 +85,13 @@ def _slider(dialog: QtWidgets.QDialog, *, minimum: int) -> QtWidgets.QSlider:
         if int(item.minimum()) == int(minimum):
             return item
     raise AssertionError(f"Slider with minimum={minimum} not found")
+
+
+def _combo_with_items(dialog: QtWidgets.QDialog, *, count: int) -> QtWidgets.QComboBox:
+    for item in dialog.findChildren(QtWidgets.QComboBox):
+        if int(item.count()) == int(count):
+            return item
+    raise AssertionError(f"ComboBox with {count} items not found")
 
 
 def _make_result(*, source_path: str, phase: str, include_fill: bool) -> dialog_mod._BuildJobResult:
@@ -124,15 +134,15 @@ def _config(tmp_path: Path) -> AppConfig:
     )
 
 
-def test_files_to_viewer_rebuild_cutoff_stride_flow(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _ = _app()
+def test_files_to_viewer_rebuild_cutoff_quality_flow(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    _ = _app()
 
     sample = tmp_path / "from_files_tab.pwmb"
     sample.write_bytes(b"pwmb")
 
     viewports: list[_FakeViewport] = []
-    build_calls: list[tuple[str, bool]] = []
+    build_calls: list[tuple[str, bool, float]] = []
     opened_dialog: dict[str, QtWidgets.QDialog] = {}
 
     def _fake_make_viewport(parent=None):
@@ -141,7 +151,7 @@ def test_files_to_viewer_rebuild_cutoff_stride_flow(monkeypatch: pytest.MonkeyPa
         return viewport, _FakeViewport
 
     def _fake_build_job(*, source_path: str, phase: str, include_fill: bool, **_kwargs):
-        build_calls.append((phase, include_fill))
+        build_calls.append((phase, include_fill, float(_kwargs.get("quality_ratio", 0.0))))
         return _make_result(source_path=source_path, phase=phase, include_fill=include_fill)
 
     def _fake_open_viewer_dialog(owner, **_kwargs) -> None:
@@ -170,21 +180,26 @@ def test_files_to_viewer_rebuild_cutoff_stride_flow(monkeypatch: pytest.MonkeyPa
         _wait_until(lambda: "dialog" in opened_dialog)
         dialog = opened_dialog["dialog"]
         _wait_until(lambda: any(label.text().startswith("Loaded ") for label in dialog.findChildren(QtWidgets.QLabel)))
-        assert build_calls[:2] == [("contours", False), ("fill", True)]
+        assert build_calls[0][0:2] == ("contours", False)
+        assert build_calls[1][0:2] == ("fill", True)
+        assert build_calls[0][2] == pytest.approx(0.66, rel=1e-6)
+        assert build_calls[1][2] == pytest.approx(0.66, rel=1e-6)
 
         rebuild_btn = _button(dialog, "Rebuild preview")
+        cutoff_slider = _slider(dialog, minimum=0)
+        quality_combo = _combo_with_items(dialog, count=len(dialog_mod._QUALITY_PRESETS))
+        cutoff_slider.setValue(1)
+        quality_combo.setCurrentIndex(2)
+        _app().processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 50)
+        assert viewports[0].last_cutoff == 1
         rebuild_btn.click()
         _wait_until(lambda: len(build_calls) >= 4)
-        assert build_calls[2:4] == [("contours", False), ("fill", True)]
-
-        cutoff_slider = _slider(dialog, minimum=0)
-        stride_slider = _slider(dialog, minimum=1)
-        cutoff_slider.setValue(1)
-        stride_slider.setValue(3)
         _app().processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 50)
+        assert build_calls[2][0:2] == ("contours", False)
+        assert build_calls[3][0:2] == ("fill", True)
+        assert build_calls[2][2] == pytest.approx(0.33, rel=1e-6)
+        assert build_calls[3][2] == pytest.approx(0.33, rel=1e-6)
         assert len(viewports) == 1
-        assert viewports[0].last_cutoff == 1
-        assert viewports[0].last_stride == 3
     finally:
         if "dialog" in opened_dialog:
             opened_dialog["dialog"].reject()

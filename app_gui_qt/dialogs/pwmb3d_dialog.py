@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from concurrent.futures import Future
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 import math
 import os
@@ -65,6 +65,13 @@ _DEFAULT_POOL_WORKERS = 2
 _VIEWER_SETTINGS_ORG = "accloud"
 _VIEWER_SETTINGS_APP = "pwmb3d_viewer"
 _VIEWER_SETTINGS_PREFIX = "viewer"
+_VIEWER_THRESHOLD = 1
+_VIEWER_BIN_MODE = "index_strict"
+_QUALITY_PRESETS: tuple[tuple[str, float], ...] = (
+    ("Qualite max (100%)", 1.0),
+    ("Qualite intermediaire (66%)", 0.66),
+    ("Qualite basse (33%)", 0.33),
+)
 
 
 @dataclass(slots=True)
@@ -81,6 +88,8 @@ class _BuildJobResult:
     metrics: BuildMetrics
     contour_cache_hit: bool
     geometry_cache_hit: bool
+    sampled_layer_count: int = 0
+    quality_ratio: float = 1.0
 
 
 @dataclass(slots=True)
@@ -88,6 +97,69 @@ class _RunnerStrategy:
     pool_kind: str
     workers: int
     reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class _RenderPalette:
+    label: str
+    clear_rgb: tuple[float, float, float]
+    line_rgb: tuple[float, float, float]
+    fill_rgba: tuple[float, float, float, float]
+    point_rgb: tuple[float, float, float]
+
+
+_RENDER_PALETTES: tuple[_RenderPalette, ...] = (
+    _RenderPalette(
+        label="Lagoon Contrast",
+        clear_rgb=(0.06, 0.11, 0.14),
+        line_rgb=(0.56, 0.95, 0.93),
+        fill_rgba=(0.20, 0.84, 0.74, 0.50),
+        point_rgb=(0.95, 0.97, 0.98),
+    ),
+    _RenderPalette(
+        label="Slate Amber",
+        clear_rgb=(0.10, 0.11, 0.13),
+        line_rgb=(0.98, 0.78, 0.36),
+        fill_rgba=(0.52, 0.60, 0.72, 0.52),
+        point_rgb=(1.00, 0.97, 0.90),
+    ),
+    _RenderPalette(
+        label="Paper Navy",
+        clear_rgb=(0.95, 0.96, 0.97),
+        line_rgb=(0.11, 0.22, 0.38),
+        fill_rgba=(0.21, 0.56, 0.89, 0.44),
+        point_rgb=(0.05, 0.09, 0.16),
+    ),
+    _RenderPalette(
+        label="Carbon Mint",
+        clear_rgb=(0.05, 0.06, 0.07),
+        line_rgb=(0.55, 1.00, 0.81),
+        fill_rgba=(0.15, 0.54, 0.48, 0.56),
+        point_rgb=(0.88, 0.94, 0.91),
+    ),
+    _RenderPalette(
+        label="Sand Cyan",
+        clear_rgb=(0.90, 0.88, 0.83),
+        line_rgb=(0.08, 0.44, 0.52),
+        fill_rgba=(0.12, 0.70, 0.73, 0.42),
+        point_rgb=(0.05, 0.17, 0.21),
+    ),
+    _RenderPalette(
+        label="Light Gray Cyan",
+        clear_rgb=(0.88, 0.89, 0.90),
+        line_rgb=(0.00, 0.86, 0.84),
+        fill_rgba=(0.24, 0.24, 0.27, 0.58),
+        point_rgb=(0.08, 0.10, 0.11),
+    ),
+)
+
+
+def _resolve_palette(label: str | None) -> _RenderPalette:
+    requested = str(label or "").strip().lower()
+    for palette in _RENDER_PALETTES:
+        if palette.label.strip().lower() == requested:
+            return palette
+    return _RENDER_PALETTES[0]
 
 
 def _coerce_pool_workers(raw_value: str | None) -> int:
@@ -200,6 +272,7 @@ def _build_geometry_job(
     op_id: str,
     pool_kind: str,
     workers: int,
+    quality_ratio: float = 0.66,
     cancel_token: object | None = None,
     progress_cb: Callable[[str, int, str], None] | None = None,
 ) -> _BuildJobResult:
@@ -228,11 +301,13 @@ def _build_geometry_job(
                 height=document.height,
                 layer_count=layer_count,
             )
-            z_stride = _select_preview_z_stride(
-                layer_count=layer_count,
-                width=document.width,
-                height=document.height,
-            )
+            selected_quality_ratio = max(0.05, min(1.0, float(quality_ratio)))
+            sampled_positions = _sample_layers_by_ratio(list(range(layer_count)), selected_quality_ratio)
+            sampled_layer_count = len(sampled_positions)
+            sampled_document = document
+            if sampled_layer_count > 0 and sampled_layer_count < layer_count:
+                sampled_document = replace(document, layers=[document.layers[pos] for pos in sampled_positions])
+            z_stride = 1
             max_vertices_profile = _select_preview_max_vertices(
                 width=document.width,
                 height=document.height,
@@ -260,6 +335,9 @@ def _build_geometry_job(
                         "geom_backend": backend.name,
                         "phase": phase,
                         "include_fill": bool(include_fill),
+                        "quality_ratio": selected_quality_ratio,
+                        "sampled_layer_count": sampled_layer_count,
+                        "document_layer_count": layer_count,
                     },
                 },
             )
@@ -282,12 +360,12 @@ def _build_geometry_job(
 
             _raise_if_cancelled(cancel_token)
             pipeline_result = build_geometry_pipeline(
-                document,
+                sampled_document,
                 threshold=threshold,
                 bin_mode=bin_mode,
                 xy_stride=xy_stride,
                 z_stride=z_stride,
-                max_layers=None,
+                max_layers=sampled_layer_count,
                 max_vertices=max_vertices,
                 max_xy_stride=1,
                 include_fill=include_fill,
@@ -324,6 +402,9 @@ def _build_geometry_job(
                         "max_vertices_applied": max_vertices,
                         "phase": phase,
                         "include_fill": bool(include_fill),
+                        "quality_ratio": selected_quality_ratio,
+                        "sampled_layer_count": sampled_layer_count,
+                        "document_layer_count": layer_count,
                         "contour_cache_hit": contour_cache_hit,
                         "geometry_cache_hit": geometry_cache_hit,
                     }
@@ -349,6 +430,8 @@ def _build_geometry_job(
                 metrics=metrics,
                 contour_cache_hit=contour_cache_hit,
                 geometry_cache_hit=geometry_cache_hit,
+                sampled_layer_count=sampled_layer_count,
+                quality_ratio=selected_quality_ratio,
             )
         except CancelledError as exc:
             emit_event(
@@ -443,6 +526,63 @@ def _camera_pose_for_orbit(
     return camera_pos, forward
 
 
+def _cross_vec3(a: tuple[float, float, float], b: tuple[float, float, float]) -> tuple[float, float, float]:
+    return (
+        (a[1] * b[2]) - (a[2] * b[1]),
+        (a[2] * b[0]) - (a[0] * b[2]),
+        (a[0] * b[1]) - (a[1] * b[0]),
+    )
+
+
+def _normalize_vec3(v: tuple[float, float, float]) -> tuple[float, float, float]:
+    length = math.sqrt((v[0] * v[0]) + (v[1] * v[1]) + (v[2] * v[2]))
+    if length <= 1e-12:
+        return (0.0, 0.0, 0.0)
+    inv = 1.0 / length
+    return (v[0] * inv, v[1] * inv, v[2] * inv)
+
+
+def _camera_axes_for_orbit(
+    *,
+    yaw_deg: float,
+    pitch_deg: float,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    _camera, forward = _camera_pose_for_orbit(
+        center=(0.0, 0.0, 0.0),
+        distance=1.0,
+        yaw_deg=yaw_deg,
+        pitch_deg=pitch_deg,
+    )
+    world_up = (0.0, 1.0, 0.0)
+    right = _normalize_vec3(_cross_vec3(forward, world_up))
+    if right == (0.0, 0.0, 0.0):
+        right = _normalize_vec3(_cross_vec3(forward, (0.0, 0.0, 1.0)))
+    up = _normalize_vec3(_cross_vec3(right, forward))
+    return right, up
+
+
+def _pan_center_for_drag(
+    *,
+    center: tuple[float, float, float],
+    distance: float,
+    yaw_deg: float,
+    pitch_deg: float,
+    dx_px: float,
+    dy_px: float,
+    pixel_scale: float = 0.0018,
+) -> tuple[float, float, float]:
+    right, up = _camera_axes_for_orbit(yaw_deg=yaw_deg, pitch_deg=pitch_deg)
+    step = max(0.05, float(distance)) * float(pixel_scale)
+    shift_x = ((-float(dx_px)) * right[0]) + (float(dy_px) * up[0])
+    shift_y = ((-float(dx_px)) * right[1]) + (float(dy_px) * up[1])
+    shift_z = ((-float(dx_px)) * right[2]) + (float(dy_px) * up[2])
+    return (
+        float(center[0] + (shift_x * step)),
+        float(center[1] + (shift_y * step)),
+        float(center[2] + (shift_z * step)),
+    )
+
+
 def _sort_layers_back_to_front(
     *,
     layer_ids: list[int],
@@ -467,6 +607,38 @@ def _sort_layers_back_to_front(
         return (vx * forward[0]) + (vy * forward[1]) + (vz * forward[2])
 
     return sorted(layer_ids, key=lambda layer_id: (-_depth(layer_id), layer_id))
+
+
+def _quality_ratio_from_index(index: int) -> float:
+    idx = max(0, min(len(_QUALITY_PRESETS) - 1, int(index)))
+    return float(_QUALITY_PRESETS[idx][1])
+
+
+def _sample_layers_by_ratio(layer_ids: list[int], ratio: float) -> list[int]:
+    layers = list(layer_ids)
+    count = len(layers)
+    if count <= 1:
+        return layers
+    target_ratio = max(0.05, min(1.0, float(ratio)))
+    if target_ratio >= 0.999:
+        return layers
+    keep = max(1, min(count, int(round(count * target_ratio))))
+    if keep >= count:
+        return layers
+    if keep == 1:
+        return [layers[-1]]
+
+    picks: list[int] = []
+    seen: set[int] = set()
+    for idx in range(keep):
+        pos = int(round((idx * (count - 1)) / float(keep - 1)))
+        if pos in seen:
+            continue
+        seen.add(pos)
+        picks.append(layers[pos])
+    if not picks:
+        return [layers[-1]]
+    return sorted(picks)
 
 
 def _build_viewport_placeholder(parent=None, *, message: str = "OpenGL renderer is unavailable."):
@@ -564,6 +736,7 @@ def _make_viewport(parent=None):
             self._last_pos = qtcore.QPoint()
             self._gpu_metrics = GpuMetrics()
             self._log_next_draw = False
+            self._palette = _RENDER_PALETTES[0]
 
         def initializeGL(self) -> None:  # noqa: N802
             try:
@@ -621,7 +794,12 @@ def _make_viewport(parent=None):
         def paintGL(self) -> None:  # noqa: N802
             if self._funcs is None:
                 return
-            self._funcs.glClearColor(0.05, 0.11, 0.10, 1.0)
+            self._funcs.glClearColor(
+                self._palette.clear_rgb[0],
+                self._palette.clear_rgb[1],
+                self._palette.clear_rgb[2],
+                1.0,
+            )
             self._funcs.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
             if self._renderer_error is not None:
                 return
@@ -644,7 +822,15 @@ def _make_viewport(parent=None):
 
                 tri_ms = 0.0
                 if not self._contour_only:
-                    self._program.setUniformValue("u_color", QtGui.QVector4D(0.23, 0.85, 0.70, 0.52))
+                    self._program.setUniformValue(
+                        "u_color",
+                        QtGui.QVector4D(
+                            self._palette.fill_rgba[0],
+                            self._palette.fill_rgba[1],
+                            self._palette.fill_rgba[2],
+                            self._palette.fill_rgba[3],
+                        ),
+                    )
                     tri_ms = self._draw_buffer(
                         vbo=self._vbo_tri,
                         mode=GL_TRIANGLES,
@@ -652,14 +838,30 @@ def _make_viewport(parent=None):
                         layers=draw_layers,
                     )
 
-                self._program.setUniformValue("u_color", QtGui.QVector4D(0.05, 0.95, 0.85, 1.0))
+                self._program.setUniformValue(
+                    "u_color",
+                    QtGui.QVector4D(
+                        self._palette.line_rgb[0],
+                        self._palette.line_rgb[1],
+                        self._palette.line_rgb[2],
+                        1.0,
+                    ),
+                )
                 line_ms = self._draw_buffer(
                     vbo=self._vbo_line,
                     mode=GL_LINES,
                     ranges=self._geometry.line_range,
                     layers=draw_layers,
                 )
-                self._program.setUniformValue("u_color", QtGui.QVector4D(0.95, 0.95, 0.95, 1.0))
+                self._program.setUniformValue(
+                    "u_color",
+                    QtGui.QVector4D(
+                        self._palette.point_rgb[0],
+                        self._palette.point_rgb[1],
+                        self._palette.point_rgb[2],
+                        1.0,
+                    ),
+                )
                 point_ms = self._draw_buffer(
                     vbo=self._vbo_point,
                     mode=GL_POINTS,
@@ -871,6 +1073,14 @@ def _make_viewport(parent=None):
             self._log_next_draw = True
             self.update()
 
+        def set_render_palette(self, label: str) -> None:
+            resolved = _resolve_palette(label)
+            if resolved == self._palette:
+                return
+            self._palette = resolved
+            self._log_next_draw = True
+            self.update()
+
         def reset_camera(self) -> None:
             self._yaw_deg = -35.0
             self._pitch_deg = 28.0
@@ -915,6 +1125,18 @@ def _make_viewport(parent=None):
             if event.buttons() & qtcore.Qt.MouseButton.LeftButton:
                 self._yaw_deg += dx * 0.35
                 self._pitch_deg = max(-89.0, min(89.0, self._pitch_deg + dy * 0.35))
+                self._log_next_draw = True
+                self.update()
+            elif event.buttons() & qtcore.Qt.MouseButton.RightButton:
+                cx, cy, cz = _pan_center_for_drag(
+                    center=(self._center.x(), self._center.y(), self._center.z()),
+                    distance=self._distance,
+                    yaw_deg=self._yaw_deg,
+                    pitch_deg=self._pitch_deg,
+                    dx_px=dx,
+                    dy_px=dy,
+                )
+                self._center = QtGui.QVector3D(cx, cy, cz)
                 self._log_next_draw = True
                 self.update()
             super().mouseMoveEvent(event)
@@ -981,7 +1203,10 @@ def build_pwmb3d_dialog(
 
     title = qtwidgets.QLabel("PWMB 3D Viewer")
     title.setObjectName("title")
-    subtitle = qtwidgets.QLabel("OpenGL viewport + progressive CPU build (contours first, fill pass second).")
+    subtitle = qtwidgets.QLabel(
+        "OpenGL viewport + progressive CPU build (contours first, fill pass second). "
+        "Mouse: left=orbit, right=pan, wheel=zoom."
+    )
     subtitle.setObjectName("subtitle")
     root.addWidget(title)
     root.addWidget(subtitle)
@@ -1006,15 +1231,6 @@ def build_pwmb3d_dialog(
     source_box.setLayout(source_row)
     form.addRow("PWMB file", source_box)
 
-    threshold_spin = qtwidgets.QSpinBox()
-    threshold_spin.setRange(0, 255)
-    threshold_spin.setValue(1)
-    form.addRow("Threshold", threshold_spin)
-
-    bin_mode = qtwidgets.QComboBox()
-    bin_mode.addItems(["index_strict", "threshold"])
-    form.addRow("Binarization", bin_mode)
-
     cutoff_slider = qtwidgets.QSlider(qtcore.Qt.Orientation.Horizontal)
     cutoff_slider.setRange(0, 100)
     cutoff_slider.setValue(100)
@@ -1030,14 +1246,15 @@ def build_pwmb3d_dialog(
     cutoff_box.setLayout(cutoff_row)
     form.addRow("Layer cutoff", cutoff_box)
 
-    stride_slider = qtwidgets.QSlider(qtcore.Qt.Orientation.Horizontal)
-    stride_slider.setRange(1, 16)
-    stride_slider.setValue(1)
-    form.addRow("Stride Z", stride_slider)
-
     quality = qtwidgets.QComboBox()
-    quality.addItems(["Interactive", "Balanced", "Full quality"])
+    for quality_label, _ratio in _QUALITY_PRESETS:
+        quality.addItem(quality_label)
     form.addRow("Quality", quality)
+
+    palette_select = qtwidgets.QComboBox()
+    for palette in _RENDER_PALETTES:
+        palette_select.addItem(palette.label)
+    form.addRow("Palette", palette_select)
 
     contour_only = qtwidgets.QCheckBox("Contour only")
     form.addRow("", contour_only)
@@ -1081,20 +1298,13 @@ def build_pwmb3d_dialog(
         rebuild_btn.setEnabled(not busy)
         retry_btn.setEnabled(bool((not busy) and last_error_text))
         cancel_btn.setEnabled(bool(busy and build_future is not None and not build_future.done()))
-        threshold_spin.setEnabled(not busy)
-        bin_mode.setEnabled(not busy)
+        quality.setEnabled(not busy)
+        palette_select.setEnabled(not busy)
         progress.setVisible(busy)
         if not busy:
             progress.setValue(0)
         if message is not None:
             info_label.setText(message)
-
-    def _read_setting_int(key: str, default: int) -> int:
-        raw = settings.value(f"{_VIEWER_SETTINGS_PREFIX}/{key}", default)
-        try:
-            return int(raw)
-        except Exception:
-            return int(default)
 
     def _read_setting_bool(key: str, default: bool) -> bool:
         raw = settings.value(f"{_VIEWER_SETTINGS_PREFIX}/{key}", default)
@@ -1108,20 +1318,18 @@ def build_pwmb3d_dialog(
         return bool(default)
 
     def _load_viewer_settings() -> None:
-        threshold_spin.setValue(max(0, min(255, _read_setting_int("threshold", 1))))
-        saved_bin_mode = str(settings.value(f"{_VIEWER_SETTINGS_PREFIX}/bin_mode", "index_strict")).strip()
-        bin_index = max(0, bin_mode.findText(saved_bin_mode))
-        bin_mode.setCurrentIndex(bin_index)
-        stride_slider.setValue(max(1, min(16, _read_setting_int("stride_z", 1))))
-        quality_index = max(0, min(quality.count() - 1, _read_setting_int("quality_index", 0)))
-        quality.setCurrentIndex(quality_index)
+        quality.setCurrentIndex(1)
+        saved_palette = str(
+            settings.value(f"{_VIEWER_SETTINGS_PREFIX}/palette_label", _RENDER_PALETTES[0].label)
+        ).strip()
+        palette_index = palette_select.findText(saved_palette)
+        if palette_index < 0:
+            palette_index = 0
+        palette_select.setCurrentIndex(palette_index)
         contour_only.setChecked(_read_setting_bool("contour_only", False))
 
     def _save_viewer_settings() -> None:
-        settings.setValue(f"{_VIEWER_SETTINGS_PREFIX}/threshold", int(threshold_spin.value()))
-        settings.setValue(f"{_VIEWER_SETTINGS_PREFIX}/bin_mode", bin_mode.currentText().strip())
-        settings.setValue(f"{_VIEWER_SETTINGS_PREFIX}/stride_z", int(stride_slider.value()))
-        settings.setValue(f"{_VIEWER_SETTINGS_PREFIX}/quality_index", int(quality.currentIndex()))
+        settings.setValue(f"{_VIEWER_SETTINGS_PREFIX}/palette_label", palette_select.currentText().strip())
         settings.setValue(f"{_VIEWER_SETTINGS_PREFIX}/contour_only", bool(contour_only.isChecked()))
         settings.sync()
 
@@ -1178,15 +1386,14 @@ def build_pwmb3d_dialog(
     def _apply_viewport_controls() -> None:
         if viewport_type is None:
             return
-        force_full = quality.currentText().strip().lower().startswith("full")
-        stride_value = max(1, stride_slider.value())
-        if quality.currentText().strip().lower().startswith("balanced"):
-            stride_value = max(1, stride_value // 2)
-
-        viewport_widget.set_stride_z(stride_value)
-        viewport_widget.set_force_full_quality(force_full)
+        quality_ratio = _quality_ratio_from_index(quality.currentIndex())
+        viewport_widget.set_stride_z(1)
+        viewport_widget.set_force_full_quality(bool(quality_ratio >= 0.999))
         viewport_widget.set_contour_only(contour_only.isChecked())
         viewport_widget.set_layer_cutoff(cutoff_slider.value())
+        apply_palette = getattr(viewport_widget, "set_render_palette", None)
+        if callable(apply_palette):
+            apply_palette(palette_select.currentText().strip())
 
     def _refresh_cutoff_label() -> None:
         current = int(cutoff_slider.value())
@@ -1274,13 +1481,14 @@ def build_pwmb3d_dialog(
         build_future = runner.submit(
             _build_geometry_job,
             source_path=str(source),
-            threshold=int(threshold_spin.value()),
-            bin_mode=bin_mode.currentText().strip(),
+            threshold=int(_VIEWER_THRESHOLD),
+            bin_mode=_VIEWER_BIN_MODE,
             phase=str(phase),
             include_fill=bool(include_fill),
             op_id=build_op_id,
             pool_kind=runner_strategy.pool_kind,
             workers=runner_strategy.workers,
+            quality_ratio=_quality_ratio_from_index(quality.currentIndex()),
             cancel_token=cancel_token_arg,
             progress_cb=progress_cb,
         )
@@ -1327,8 +1535,9 @@ def build_pwmb3d_dialog(
                 data={
                     "action": "viewer3d.rebuild",
                     "file_name": source.name,
-                    "threshold": int(threshold_spin.value()),
-                    "bin_mode": bin_mode.currentText().strip(),
+                    "threshold": int(_VIEWER_THRESHOLD),
+                    "bin_mode": _VIEWER_BIN_MODE,
+                    "quality_ratio": _quality_ratio_from_index(quality.currentIndex()),
                     "backend": selected_backend.name,
                     "pool_kind": runner_strategy.pool_kind,
                     "workers": int(runner_strategy.workers),
@@ -1475,6 +1684,7 @@ def build_pwmb3d_dialog(
             info_label.setText(
                 "Contours ready "
                 f"({Path(result.source_path).name}, layers={len(result.built_layer_ids)}/{result.document_layer_count}, "
+                f"converted={result.sampled_layer_count}/{result.document_layer_count}, "
                 f"xy_stride={result.xy_stride}, z_stride={result.z_stride}) - triangulating fill pass..."
             )
             source = build_source or Path(result.source_path)
@@ -1491,6 +1701,8 @@ def build_pwmb3d_dialog(
             f"backend={result.backend_name} | "
             f"phase=progressive(contours->fill) | "
             f"layers={len(result.built_layer_ids)}/{result.document_layer_count} | "
+            f"converted={result.sampled_layer_count}/{result.document_layer_count} | "
+            f"quality={int(round(result.quality_ratio * 100.0))}% | "
             f"xy_stride={result.xy_stride} | "
             f"z_stride={result.z_stride} | "
             f"tris={len(result.geometry.triangle_vertices) // 3} | "
@@ -1581,11 +1793,9 @@ def build_pwmb3d_dialog(
     export_btn.clicked.connect(_export_screenshot)
     poll_timer.timeout.connect(_poll_async)
     cutoff_slider.valueChanged.connect(lambda _v: (_refresh_cutoff_label(), _apply_viewport_controls()))
-    stride_slider.valueChanged.connect(lambda _v: (_apply_viewport_controls(), _save_viewer_settings()))
     quality.currentIndexChanged.connect(lambda _i: (_apply_viewport_controls(), _save_viewer_settings()))
+    palette_select.currentIndexChanged.connect(lambda _i: (_apply_viewport_controls(), _save_viewer_settings()))
     contour_only.stateChanged.connect(lambda _v: (_apply_viewport_controls(), _save_viewer_settings()))
-    threshold_spin.valueChanged.connect(lambda _v: _save_viewer_settings())
-    bin_mode.currentTextChanged.connect(lambda _text: _save_viewer_settings())
     dialog.finished.connect(lambda _code: _cleanup())
 
     if pwmb_path is not None:
