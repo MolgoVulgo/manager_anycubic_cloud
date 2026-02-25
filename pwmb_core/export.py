@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 import struct
 import zlib
 
-from pwmb_core.container import decode_layer
+from pwmb_core.container import decode_layer, open_layer_blob_reader
 from pwmb_core.types import PwmbDocument
 
 
@@ -23,13 +24,19 @@ def export_layers_to_png(
         raise ValueError("PWMB document has invalid dimensions")
 
     digits = max(5, len(str(len(document.layers))))
-    for layer_index, _layer in enumerate(document.layers):
-        try:
-            decoded = decode_layer(document, layer_index, threshold=threshold)
-        except Exception:
-            decoded = [0] * pixel_count
-        output = target / f"layer_{layer_index:0{digits}d}.png"
-        _write_grayscale_png(output, width=width, height=height, pixels=decoded)
+    reader_context: object
+    try:
+        reader_context = open_layer_blob_reader(document)
+    except Exception:
+        reader_context = nullcontext(None)
+    with reader_context as reader:
+        for layer_index, _layer in enumerate(document.layers):
+            try:
+                decoded = decode_layer(document, layer_index, threshold=threshold, reader=reader)
+            except Exception:
+                decoded = [0] * pixel_count
+            output = target / f"layer_{layer_index:0{digits}d}.png"
+            _write_grayscale_png(output, width=width, height=height, pixels=decoded)
 
 
 def _write_grayscale_png(path: Path, *, width: int, height: int, pixels: list[int]) -> None:

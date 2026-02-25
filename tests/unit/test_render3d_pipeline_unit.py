@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from pwmb_core.types import HeaderInfo, LayerDef, MachineInfo, PwmbDocument
 from render3d_core.cache import BuildCache, make_cache_key
 from render3d_core.pipeline import build_geometry_pipeline
+from render3d_core.task_runner import CancellationToken, CancelledError
 from render3d_core.types import LayerLoops, PwmbContourGeometry, PwmbContourStack
 
 
@@ -63,8 +66,9 @@ class _FakeBackend:
         binarization_mode: str,
         xy_stride: int,
         metrics=None,
+        cancel_token=None,
     ) -> PwmbContourStack:
-        _ = (threshold, binarization_mode, xy_stride, metrics)
+        _ = (threshold, binarization_mode, xy_stride, metrics, cancel_token)
         self.calls.append("contours")
         self.contour_document_layer_counts.append(len(_document.layers))
         return self._contour_stack
@@ -78,8 +82,9 @@ class _FakeBackend:
         max_xy_stride: int,
         include_fill: bool = True,
         metrics=None,
+        cancel_token=None,
     ) -> PwmbContourGeometry:
-        _ = (max_layers, max_vertices, max_xy_stride, metrics)
+        _ = (max_layers, max_vertices, max_xy_stride, metrics, cancel_token)
         assert contour_stack is self._contour_stack
         self.calls.append("geometry")
         self.include_fill_values.append(bool(include_fill))
@@ -285,3 +290,57 @@ def test_build_geometry_pipeline_contours_only_uses_distinct_geometry_cache_key(
     )
     assert result.geometry_key == expected_key
     assert backend.include_fill_values == [False]
+
+
+def test_build_geometry_pipeline_cancels_before_backend_calls(tmp_path: Path) -> None:
+    path = tmp_path / "sample.pwmb"
+    path.write_bytes(b"pwmb")
+    document = _document(path)
+    backend = _FakeBackend(_stack(), _geometry())
+    token = CancellationToken()
+    token.cancel()
+
+    with pytest.raises(CancelledError):
+        _ = build_geometry_pipeline(
+            document,
+            threshold=1,
+            bin_mode="index_strict",
+            xy_stride=1,
+            max_xy_stride=1,
+            backend=backend,
+            cache=None,
+            cancel_token=token,
+        )
+
+    assert backend.calls == []
+
+
+def test_build_geometry_pipeline_cancels_between_contours_and_geometry(tmp_path: Path) -> None:
+    path = tmp_path / "sample.pwmb"
+    path.write_bytes(b"pwmb")
+    document = _document(path)
+    stack = _stack()
+    geometry = _geometry()
+    token = CancellationToken()
+
+    class _CancelAfterContoursBackend(_FakeBackend):
+        def build_contours(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            result = super().build_contours(*args, **kwargs)
+            token.cancel()
+            return result
+
+    backend = _CancelAfterContoursBackend(stack, geometry)
+
+    with pytest.raises(CancelledError):
+        _ = build_geometry_pipeline(
+            document,
+            threshold=1,
+            bin_mode="index_strict",
+            xy_stride=1,
+            max_xy_stride=1,
+            backend=backend,
+            cache=None,
+            cancel_token=token,
+        )
+
+    assert backend.calls == ["contours"]

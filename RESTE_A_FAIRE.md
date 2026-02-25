@@ -1,42 +1,69 @@
-# Reste à Faire
+# Reste a Faire
 
-Date: 2026-02-23
-Contexte: lots A (pipeline CPU contours/géométrie) et B (viewer OpenGL + wiring Files->Viewer) implémentés.
+Date: 2026-02-25
+Contexte: migration render3d Python -> C++ en cours, avec pipeline unifie et backend C++ contours deja integre.
 
-## Priorité 1 - Lot C
+## Lots realises
 
-- [x] Brancher le cache 3D réel (contours + geometry) avec clés d'invalidation complètes.
-- [x] Appliquer strictement les règles d'invalidation selon les paramètres build (`threshold`, `bin_mode`, strides, budgets, simplification, render mode).
-- [x] Ajouter l'instrumentation perf CPU/GPU (`parse/decode/contours/triangulation/upload/draw`) avec logs stables.
-- [x] Ajouter la gestion explicite des stages de progression (`read`, `decode`, `contours`, `geometry`, `upload`, `done`, `cache`) dans le viewer.
-- [x] Rendre non-bloquant le chargement d'un fichier cloud pour le viewer (download async au lieu du callback synchrone).
+- [x] Lot A - Baseline + contrat backend
+  - backend selectionnable `python|cpp`,
+  - invariants geometriques,
+  - script baseline corpus.
+- [x] Lot B - Pipeline contract + orchestration viewer
+  - point d'entree unique `build_geometry_pipeline(...)`,
+  - integration cache/stages/metriques,
+  - rendu progressif 2 passes (contours puis fill) dans le viewer.
+- [x] Lot C - C++ contours (extracteur natif)
+  - module `pwmb_geom_cpp` + bindings `pybind11`,
+  - integration backend C++ avec fallback python.
+- [x] Correctifs fonctionnels post lots A/B/C
+  - decode PW0 adaptatif (`word16` / `byte_token`) pour compatibilite Lychee/Anycubic,
+  - observabilite cutoff (`Lcurrent/max` + `cutoff_layer` dans logs draw).
 
-## Priorité 1.5 - Lot D
+## Lots a faire (priorises)
 
-- [x] Implémenter un rendu progressif 3D en 2 passes (contours d'abord, fill/triangulation ensuite).
-- [x] Conserver les interactions viewport pendant la pass fill (aperçu contours déjà affiché).
-- [x] Réutiliser le cache de contours entre les deux passes pour éviter un second decode/contours complet.
+### Lot D (optionnel) - OpenCV contours backend
+- [x] Ajouter implementation OpenCV (`findContours` + hierarchie) en option.
+- [x] Ajouter selecteur implementation C++ (`native|opencv|auto`) sans casser `GEOM_BACKEND=cpp`.
+- [x] Comparer `python` vs `cpp(native)` vs `cpp(opencv)` (aire/bbox/loops/perf).
+- [x] Decider la valeur par defaut (`native` ou `opencv`) selon corpus.
+  - Decision: **default = native** (parite fonctionnelle stricte avec Python sur corpus, perf globale meilleure qu'OpenCV).
 
-## Qualité Technique
+### Lot E - Triangulation C++
+- [x] Integrer triangulation native C++ (ear clipping/axis-aligned path).
+- [x] Garantir absence de triangles degeneres (degenerate_triangles=0 sur campagne).
+- [x] Verifier parite aire/bbox avec backend Python (campagne post Lot E).
 
-- [ ] Renforcer la triangulation des polygones avec trous pour les cas non axis-alignés complexes.
-- [ ] Implémenter/valider un tri back-to-front basé caméra pour les layers translucides.
-- [ ] Ajouter une vraie stratégie de fallback renderer quand OpenGL init/upload échoue.
-- [ ] Connecter la logique d'annulation (`CancellationToken`) au build 3D complet.
-- [ ] Aligner le mode `index_strict` sur `color_index != 0` de façon stricte (aujourd'hui best-effort via intensité).
+### Lot F - Buffers contigus / zero-copy
+- [x] Sorties NumPy contigues float32/uint32 depuis backend C++.
+- [x] Limiter les reconstructions Python de vertices/indices.
+- [x] Mesurer gain `buffers_ms_total`.
 
-## Tests à Ajouter
+### Lot G - I/O decode couches
+- [x] Remplacer re-ouverture fichier par couche par acces persistant (mmap/handle partage).
+- [x] Re-mesurer `decode_ms_total` et stabilite multi-workers.
 
-- [x] Tests unitaires de cache/invalidation 3D.
-- [x] Tests unitaires des métriques perf.
-- [x] Tests unitaires du callback `open_viewer` avec résolution de fichier local/cache/download.
-- [ ] Tests d'intégration du pipeline viewer (build async -> upload -> draw/ranges visibles).
-- [ ] Goldens PWMB (`cube`, `cube2`, `misteer`) pour non-régression orientation/bbox/checksum.
-- [ ] E2E minimal GUI: ouverture viewer depuis `Files`, rebuild, changement cutoff/stride sans rebuild CPU.
+### Lot H - Parallellisation et annulation
+- [x] Finaliser strategie threads/process selon sections calculees en C++.
+  - Strategie viewer explicite et loggee (`RENDER3D_POOL_KIND/WORKERS`, mode `auto`), avec execution effective en `threads` pour conserver progress/cancellation cooperatives.
+- [x] Connecter pleinement l'annulation au build 3D complet.
+  - Token branche bout-en-bout (`dialog -> job -> pipeline -> backend -> contours/geometry`) + bouton UI "Cancel build" + restart propre apres annulation.
 
-## UX Viewer
+## Qualite technique et UX (restant)
 
-- [ ] Afficher des erreurs utilisateur plus explicites (parse/décodage/GL) avec actions de retry.
-- [ ] Ajouter un indicateur clair "build en cours / source cache".
-- [ ] Mémoriser les paramètres viewer (threshold, mode, stride, contour-only) entre ouvertures.
-- [ ] Ajouter option d'ouverture directe d'un fichier local depuis le header principal.
+- [x] Renforcer triangulation polygons+holes non axis-alignes complexes.
+  - triangulation scanline generalisee ajoutee (Python + C++) avec fallback ear-clip, tests aire+degeneres sur cas non axis-alignes multi-holes.
+- [x] Implementer/valider tri back-to-front camera pour couches translucides.
+- [x] Ajouter fallback renderer robuste si OpenGL init/upload echoue.
+- [x] Aligner strictement `index_strict` avec `color_index != 0` (pas uniquement intensite best-effort).
+- [x] Ajouter messages erreur utilisateur plus explicites (parse/decode/GL) + retry.
+- [x] Memorisations des parametres viewer entre ouvertures.
+
+## Tests a ajouter
+
+- [x] Tests unitaires cache/invalidation backend+pipeline.
+- [x] Tests unitaires metriques/invariants.
+- [x] Tests unitaires decode PW0 variantes + fallback integration.
+- [x] Tests integration viewer (build async -> upload -> draw/ranges visibles).
+- [x] Goldens PWMB de non-regression (orientation/bbox/checksum).
+- [x] E2E GUI minimal depuis Files -> Viewer -> rebuild -> cutoff/stride.

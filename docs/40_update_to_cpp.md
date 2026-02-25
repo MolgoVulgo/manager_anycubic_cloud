@@ -59,9 +59,12 @@ Définir un contrat unique entre “extraction” et “mesh builder”, pour po
 ## 5) Stack algo (C++ natif)
 
 ### 5.1 Extraction contours
-- Recommandé : **OpenCV** en C++
-  - `findContours` avec hiérarchie pour outer/holes (RETR_TREE/CCOMP)
-  - compression des points (CHAIN_APPROX_SIMPLE)
+- Implémenté (Lot C) : **extracteur natif C++** (edge-boundary extraction),
+  - port sémantique de la logique Python (`_extract_loops` + classification outer/holes),
+  - exposé via `pybind11` dans le module `_pwmb_geom`.
+- Recommandation initiale (alternative) : **OpenCV** en C++
+  - `findContours` avec hiérarchie pour outer/holes (RETR_TREE/CCOMP),
+  - compression des points (CHAIN_APPROX_SIMPLE).
 - Alternatives :
   - marching squares (si on veut des isocontours plus “lisses”, moins adapté au raster orthogonal)
   - vectorisation GIS (raster→polygons) si besoin, mais plus lourd.
@@ -91,9 +94,18 @@ Définir un contrat unique entre “extraction” et “mesh builder”, pour po
 
 ### Phase C — Impl C++ v1 : contours → polygons
 1. Créer projet CMake `pwmb_geom_cpp`
-2. Impl `extract_polygons(mask)` via OpenCV
+2. Impl `extract_polygons(mask)` (extracteur natif C++ ; OpenCV non retenu dans cette itération)
 3. Exposer au Python via pybind11
 4. Valider : aire/bbox/nb loops/holes vs backend Python
+
+### Phase C-bis — Option OpenCV (lot optionnel)
+1. Ajouter un extracteur contours OpenCV en backend alternatif (`findContours` + hierarchie).
+2. Selectionner l'implementation via flag/env (ex: `GEOM_CPP_CONTOURS_IMPL=native|opencv`).
+3. Verifier la parite semantique avec l'extracteur natif:
+   - surfaces (outer-holes),
+   - bbox,
+   - nombre de loops/hierarchie.
+4. Mesurer les performances sur corpus reel et garder l'option la plus robuste.
 
 ### Phase D — Impl C++ v2 : polygons → triangles
 1. Ajouter earcut.hpp
@@ -130,14 +142,14 @@ Définir un contrat unique entre “extraction” et “mesh builder”, pour po
 
 ## 8) Risques et parades
 - **Différences topologiques** (hiérarchie trous/outer) :
-  - utiliser la hiérarchie OpenCV, + tests d’aire et mapping stable
+  - normaliser la hiérarchie côté extracteur natif C++, + tests d’aire et mapping stable
 - **Orientation / winding** :
   - normaliser CW/CCW côté C++ et documenter
 - **Auto-intersections / cas pathologiques** :
   - nettoyage + validation (clipper optionnel)
 - **Dépendances lourdes (OpenCV)** :
-  - option compile-time : `WITH_OPENCV=ON/OFF`
-  - alternative si besoin (skimage/own algo)
+  - OpenCV n'est pas requis dans l'impl actuelle (extracteur natif),
+  - possibilité de variante OpenCV ultérieure si besoin d'interop/robustesse sur corpus élargi.
 
 ## 9) Critères d’acceptation
 - Visuel : rendu identique (tolérance) sur corpus
@@ -147,9 +159,9 @@ Définir un contrat unique entre “extraction” et “mesh builder”, pour po
 
 ## 10) Roadmap courte (ordre optimal)
 1. Interface backend + baseline
-2. C++ contours (OpenCV)
-3. C++ triangulation (earcut)
-4. Buffers contigus
-5. I/O mmap persistant
-6. Parallélisation
-
+2. C++ contours (extracteur natif ; OpenCV optionnel)
+3. Option OpenCV contours (A/B test perf + robustesse)
+4. C++ triangulation (earcut)
+5. Buffers contigus
+6. I/O mmap persistant
+7. Parallélisation

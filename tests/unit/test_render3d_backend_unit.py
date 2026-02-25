@@ -8,6 +8,7 @@ import pytest
 from pwmb_core.types import HeaderInfo, LayerDef, MachineInfo, PwmbDocument
 from render3d_core.backend import GEOM_BACKEND_ENV, resolve_geometry_backend
 from render3d_core.perf import BuildMetrics
+from render3d_core.task_runner import CancellationToken
 from render3d_core.types import LayerLoops, PwmbContourGeometry, PwmbContourStack
 
 
@@ -92,5 +93,55 @@ def test_resolve_geometry_backend_cpp_when_module_is_available(monkeypatch: pyte
         include_fill=True,
         metrics=BuildMetrics(),
     )
+    assert stack is fake_stack
+    assert geometry is fake_geometry
+
+
+def test_cpp_backend_fallback_when_module_lacks_cancel_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_stack = PwmbContourStack(pitch_x_mm=0.1, pitch_y_mm=0.1, pitch_z_mm=0.05)
+    fake_geometry = PwmbContourGeometry()
+
+    def _build_contours_legacy(*, document, threshold, binarization_mode, xy_stride, metrics):  # type: ignore[no-untyped-def]
+        _ = (document, threshold, binarization_mode, xy_stride, metrics)
+        return fake_stack
+
+    def _build_geometry_legacy(
+        *,
+        contour_stack,
+        max_layers,
+        max_vertices,
+        max_xy_stride,
+        include_fill,
+        metrics,
+    ):  # type: ignore[no-untyped-def]
+        _ = (contour_stack, max_layers, max_vertices, max_xy_stride, include_fill, metrics)
+        return fake_geometry
+
+    module = SimpleNamespace(
+        build_contours=_build_contours_legacy,
+        build_geometry=_build_geometry_legacy,
+    )
+    token = CancellationToken()
+    monkeypatch.setattr("render3d_core.backend.importlib.import_module", lambda _name: module)
+    backend = resolve_geometry_backend(preferred="cpp")
+
+    stack = backend.build_contours(
+        _document(),
+        threshold=1,
+        binarization_mode="index_strict",
+        xy_stride=1,
+        metrics=BuildMetrics(),
+        cancel_token=token,
+    )
+    geometry = backend.build_geometry(
+        stack,
+        max_layers=None,
+        max_vertices=None,
+        max_xy_stride=1,
+        include_fill=True,
+        metrics=BuildMetrics(),
+        cancel_token=token,
+    )
+
     assert stack is fake_stack
     assert geometry is fake_geometry

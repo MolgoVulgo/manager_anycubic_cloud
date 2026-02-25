@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -63,46 +64,65 @@ def _compare_case(
     max_vertices: int | None,
     max_xy_stride: int,
     area_tol: float,
+    cpp_contours_impl: str | None,
 ) -> dict[str, Any]:
     signature = compute_file_signature(path)
     document = read_pwmb_document(path)
 
     py_backend = resolve_geometry_backend(preferred="python")
-    cpp_backend = resolve_geometry_backend(preferred="cpp")
-    if cpp_backend.name != "cpp":
-        raise RuntimeError("cpp backend unavailable (pwmb_geom not importable)")
+    prev_cpp_impl = os.getenv("GEOM_CPP_CONTOURS_IMPL")
+    cpp_impl_effective: str | None = None
+    if cpp_contours_impl is not None:
+        os.environ["GEOM_CPP_CONTOURS_IMPL"] = str(cpp_contours_impl)
+    try:
+        cpp_backend = resolve_geometry_backend(preferred="cpp")
+        if cpp_backend.name != "cpp":
+            raise RuntimeError("cpp backend unavailable (pwmb_geom not importable)")
 
-    py_metrics = BuildMetrics(pool_kind="threads", workers=1)
-    cpp_metrics = BuildMetrics(pool_kind="threads", workers=1)
+        py_metrics = BuildMetrics(pool_kind="threads", workers=1)
+        cpp_metrics = BuildMetrics(pool_kind="threads", workers=1)
 
-    py_result = build_geometry_pipeline(
-        document,
-        threshold=threshold,
-        bin_mode=bin_mode,
-        xy_stride=xy_stride,
-        z_stride=max(1, int(z_stride)),
-        max_layers=max_layers,
-        max_vertices=max_vertices,
-        max_xy_stride=max_xy_stride,
-        file_signature=signature,
-        backend=py_backend,
-        cache=None,
-        metrics=py_metrics,
-    )
-    cpp_result = build_geometry_pipeline(
-        document,
-        threshold=threshold,
-        bin_mode=bin_mode,
-        xy_stride=xy_stride,
-        z_stride=max(1, int(z_stride)),
-        max_layers=max_layers,
-        max_vertices=max_vertices,
-        max_xy_stride=max_xy_stride,
-        file_signature=signature,
-        backend=cpp_backend,
-        cache=None,
-        metrics=cpp_metrics,
-    )
+        py_result = build_geometry_pipeline(
+            document,
+            threshold=threshold,
+            bin_mode=bin_mode,
+            xy_stride=xy_stride,
+            z_stride=max(1, int(z_stride)),
+            max_layers=max_layers,
+            max_vertices=max_vertices,
+            max_xy_stride=max_xy_stride,
+            file_signature=signature,
+            backend=py_backend,
+            cache=None,
+            metrics=py_metrics,
+        )
+        cpp_result = build_geometry_pipeline(
+            document,
+            threshold=threshold,
+            bin_mode=bin_mode,
+            xy_stride=xy_stride,
+            z_stride=max(1, int(z_stride)),
+            max_layers=max_layers,
+            max_vertices=max_vertices,
+            max_xy_stride=max_xy_stride,
+            file_signature=signature,
+            backend=cpp_backend,
+            cache=None,
+            metrics=cpp_metrics,
+        )
+        module = getattr(cpp_backend, "module", None)
+        getter = getattr(module, "current_contours_impl", None)
+        if callable(getter):
+            try:
+                cpp_impl_effective = str(getter())
+            except Exception:
+                cpp_impl_effective = None
+    finally:
+        if cpp_contours_impl is not None:
+            if prev_cpp_impl is None:
+                os.environ.pop("GEOM_CPP_CONTOURS_IMPL", None)
+            else:
+                os.environ["GEOM_CPP_CONTOURS_IMPL"] = prev_cpp_impl
 
     py_invariants = build_invariant_snapshot(py_result.contour_stack, py_result.geometry)
     cpp_invariants = build_invariant_snapshot(cpp_result.contour_stack, cpp_result.geometry)
@@ -112,7 +132,6 @@ def _compare_case(
     contour_area_delta = cpp_invariants.contour_area_mm2 - py_invariants.contour_area_mm2
     mesh_area_delta = cpp_invariants.mesh_area_mm2 - py_invariants.mesh_area_mm2
     passes = abs(contour_area_delta) <= area_tol and abs(mesh_area_delta) <= area_tol
-
     return {
         "file": str(path),
         "signature": signature,
@@ -123,6 +142,8 @@ def _compare_case(
         "max_layers": max_layers,
         "max_vertices": max_vertices,
         "max_xy_stride": max_xy_stride,
+        "cpp_contours_impl_requested": str(cpp_contours_impl) if cpp_contours_impl is not None else None,
+        "cpp_contours_impl_effective": cpp_impl_effective,
         "pass": passes,
         "python": {
             "metrics": py_metrics.as_log_data(),
@@ -164,6 +185,12 @@ def main() -> int:
     parser.add_argument("--max-layers", type=int, default=None, help="Optional layer budget.")
     parser.add_argument("--max-vertices", type=int, default=None, help="Optional vertex budget.")
     parser.add_argument("--max-xy-stride", type=int, default=1, help="Geometry simplification stride.")
+    parser.add_argument(
+        "--cpp-contours-impl",
+        default=None,
+        choices=["native", "opencv", "auto"],
+        help="C++ contour implementation selector.",
+    )
     parser.add_argument("--area-tol", type=float, default=1e-3, help="Absolute tolerance for area deltas.")
     parser.add_argument("--output", type=Path, default=None, help="Write JSON report to this path.")
     args = parser.parse_args()
@@ -186,6 +213,7 @@ def main() -> int:
                 max_vertices=max(1, int(args.max_vertices)) if args.max_vertices is not None else None,
                 max_xy_stride=max(1, int(args.max_xy_stride)),
                 area_tol=max(0.0, float(args.area_tol)),
+                cpp_contours_impl=str(args.cpp_contours_impl) if args.cpp_contours_impl is not None else None,
             )
             report["results"].append(result)
         except Exception as exc:

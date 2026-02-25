@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
+
 from render3d_core.types import Point2D, Point4D, PwmbContourGeometry, PwmbContourStack
 
 
@@ -49,32 +51,39 @@ def contour_area_mm2(contour_stack: PwmbContourStack) -> float:
 
 
 def mesh_area_mm2(geometry: PwmbContourGeometry) -> float:
-    vertices = geometry.triangle_vertices
-    total = 0.0
-    for index in range(0, len(vertices), 3):
-        if index + 2 >= len(vertices):
-            break
-        ax, ay, _az, _al = vertices[index]
-        bx, by, _bz, _bl = vertices[index + 1]
-        cx, cy, _cz, _cl = vertices[index + 2]
-        area = abs(((bx - ax) * (cy - ay)) - ((by - ay) * (cx - ax))) * 0.5
-        total += area
-    return float(total)
+    vertices = _as_vertices_array(geometry.triangle_vertices)
+    if vertices.shape[0] < 3:
+        return 0.0
+    usable = vertices.shape[0] - (vertices.shape[0] % 3)
+    if usable <= 0:
+        return 0.0
+    tri = vertices[:usable].reshape((-1, 3, 4))
+    ax = tri[:, 0, 0]
+    ay = tri[:, 0, 1]
+    bx = tri[:, 1, 0]
+    by = tri[:, 1, 1]
+    cx = tri[:, 2, 0]
+    cy = tri[:, 2, 1]
+    area = np.abs(((bx - ax) * (cy - ay)) - ((by - ay) * (cx - ax))) * 0.5
+    return float(np.sum(area, dtype=np.float64))
 
 
 def degenerate_triangle_count(geometry: PwmbContourGeometry, eps: float = 1e-12) -> int:
-    vertices = geometry.triangle_vertices
-    degenerated = 0
-    for index in range(0, len(vertices), 3):
-        if index + 2 >= len(vertices):
-            break
-        ax, ay, _az, _al = vertices[index]
-        bx, by, _bz, _bl = vertices[index + 1]
-        cx, cy, _cz, _cl = vertices[index + 2]
-        area2 = abs(((bx - ax) * (cy - ay)) - ((by - ay) * (cx - ax)))
-        if area2 <= eps:
-            degenerated += 1
-    return degenerated
+    vertices = _as_vertices_array(geometry.triangle_vertices)
+    if vertices.shape[0] < 3:
+        return 0
+    usable = vertices.shape[0] - (vertices.shape[0] % 3)
+    if usable <= 0:
+        return 0
+    tri = vertices[:usable].reshape((-1, 3, 4))
+    ax = tri[:, 0, 0]
+    ay = tri[:, 0, 1]
+    bx = tri[:, 1, 0]
+    by = tri[:, 1, 1]
+    cx = tri[:, 2, 0]
+    cy = tri[:, 2, 1]
+    area2 = np.abs(((bx - ax) * (cy - ay)) - ((by - ay) * (cx - ax)))
+    return int(np.count_nonzero(area2 <= float(eps)))
 
 
 def contour_bbox(contour_stack: PwmbContourStack) -> tuple[float, float, float, float] | None:
@@ -95,27 +104,40 @@ def contour_bbox(contour_stack: PwmbContourStack) -> tuple[float, float, float, 
 
 
 def mesh_bbox(geometry: PwmbContourGeometry) -> tuple[float, float, float, float, float, float] | None:
-    cloud: list[Point4D] = []
-    cloud.extend(geometry.triangle_vertices)
-    cloud.extend(geometry.line_vertices)
-    cloud.extend(geometry.point_vertices)
-    if not cloud:
+    tri = _as_vertices_array(geometry.triangle_vertices)
+    line = _as_vertices_array(geometry.line_vertices)
+    point = _as_vertices_array(geometry.point_vertices)
+    arrays = [arr for arr in (tri, line, point) if arr.shape[0] > 0]
+    if not arrays:
         return None
+    cloud = arrays[0] if len(arrays) == 1 else np.concatenate(arrays, axis=0)
+    mins = np.min(cloud[:, :3], axis=0)
+    maxs = np.max(cloud[:, :3], axis=0)
+    return (
+        float(mins[0]),
+        float(mins[1]),
+        float(mins[2]),
+        float(maxs[0]),
+        float(maxs[1]),
+        float(maxs[2]),
+    )
 
-    min_x = cloud[0][0]
-    min_y = cloud[0][1]
-    min_z = cloud[0][2]
-    max_x = cloud[0][0]
-    max_y = cloud[0][1]
-    max_z = cloud[0][2]
-    for x, y, z, _layer in cloud[1:]:
-        min_x = min(min_x, x)
-        min_y = min(min_y, y)
-        min_z = min(min_z, z)
-        max_x = max(max_x, x)
-        max_y = max(max_y, y)
-        max_z = max(max_z, z)
-    return (float(min_x), float(min_y), float(min_z), float(max_x), float(max_y), float(max_z))
+
+def _as_vertices_array(vertices: list[Point4D] | np.ndarray) -> np.ndarray:
+    if isinstance(vertices, np.ndarray):
+        if vertices.size == 0:
+            return np.zeros((0, 4), dtype=np.float32)
+        arr = vertices
+    else:
+        if not vertices:
+            return np.zeros((0, 4), dtype=np.float32)
+        arr = np.asarray(vertices, dtype=np.float32)
+    arr = np.asarray(arr, dtype=np.float32)
+    if arr.ndim == 1:
+        arr = arr.reshape((-1, 4))
+    elif arr.ndim != 2 or arr.shape[1] != 4:
+        arr = arr.reshape((-1, 4))
+    return np.ascontiguousarray(arr, dtype=np.float32)
 
 
 def _signed_area(points: list[Point2D]) -> float:

@@ -40,7 +40,9 @@ def build_geometry_pipeline(
     cache: BuildCache | None = None,
     metrics: BuildMetrics | None = None,
     stage_cb: Callable[[str], None] | None = None,
+    cancel_token: object | None = None,
 ) -> GeometryBuildResult:
+    _raise_if_cancelled(cancel_token)
     selected_backend = backend or get_geometry_backend()
     effective_z_stride = max(1, int(z_stride))
     contour_document = _sample_document_layers(document, z_stride=effective_z_stride)
@@ -74,6 +76,7 @@ def build_geometry_pipeline(
     contour_stack: PwmbContourStack | None = None
     contour_cache_hit = False
     if cache is not None:
+        _raise_if_cancelled(cancel_token)
         if stage_cb is not None:
             stage_cb("cache_contours_lookup")
         contour_stack = cache.get_contours(contour_key)
@@ -81,6 +84,7 @@ def build_geometry_pipeline(
         if contour_cache_hit and stage_cb is not None:
             stage_cb("cache_contours_hit")
     if contour_stack is None:
+        _raise_if_cancelled(cancel_token)
         if stage_cb is not None:
             stage_cb("decode")
             stage_cb("contours")
@@ -90,13 +94,16 @@ def build_geometry_pipeline(
             binarization_mode=bin_mode,
             xy_stride=xy_stride,
             metrics=metrics,
+            cancel_token=cancel_token,
         )
+        _raise_if_cancelled(cancel_token)
         if cache is not None:
             cache.set_contours(contour_key, contour_stack)
 
     geometry: PwmbContourGeometry | None = None
     geometry_cache_hit = False
     if cache is not None:
+        _raise_if_cancelled(cancel_token)
         if stage_cb is not None:
             stage_cb("cache_geometry_lookup")
         geometry = cache.get_geometry(geometry_key)
@@ -104,6 +111,7 @@ def build_geometry_pipeline(
         if geometry_cache_hit and stage_cb is not None:
             stage_cb("cache_geometry_hit")
     if geometry is None:
+        _raise_if_cancelled(cancel_token)
         if stage_cb is not None:
             stage_cb("geometry")
         geometry = selected_backend.build_geometry(
@@ -113,7 +121,9 @@ def build_geometry_pipeline(
             max_xy_stride=max_xy_stride,
             include_fill=include_fill,
             metrics=metrics,
+            cancel_token=cancel_token,
         )
+        _raise_if_cancelled(cancel_token)
         if cache is not None:
             cache.set_geometry(geometry_key, geometry)
 
@@ -137,3 +147,11 @@ def _sample_document_layers(document: PwmbDocument, *, z_stride: int) -> PwmbDoc
     if not sampled_layers:
         sampled_layers = document.layers[:1]
     return replace(document, layers=sampled_layers)
+
+
+def _raise_if_cancelled(cancel_token: object | None) -> None:
+    if cancel_token is None:
+        return
+    checker = getattr(cancel_token, "raise_if_cancelled", None)
+    if callable(checker):
+        checker()

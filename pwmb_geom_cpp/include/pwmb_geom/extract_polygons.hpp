@@ -14,6 +14,17 @@ struct PolygonSet {
     std::vector<Loop2i> holes;
 };
 
-PolygonSet extract_polygons(const std::uint8_t* data, int width, int height);
+enum class ContourImpl {
+    kNative,
+    kOpenCV,
+};
+
+PolygonSet extract_polygons(
+    const std::uint8_t* data,
+    int width,
+    int height,
+    ContourImpl impl = ContourImpl::kNative);
+
+bool opencv_contours_available() noexcept;
 
 }  // namespace pwmb_geom

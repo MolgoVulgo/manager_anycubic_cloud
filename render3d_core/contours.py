@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import nullcontext
 from dataclasses import dataclass
 import logging
 from time import perf_counter
@@ -9,9 +10,10 @@ from typing import Callable
 import numpy as np
 
 from accloud_core.logging_contract import emit_event, get_op_id
-from pwmb_core import decode_layer
+from pwmb_core import decode_layer, decode_layer_index_mask, open_layer_blob_reader
 from pwmb_core.types import PwmbDocument
 from render3d_core.perf import BuildMetrics
+from render3d_core.task_runner import CancelledError
 from render3d_core.types import LayerLoops, PwmbContourStack
 
 
@@ -39,7 +41,9 @@ def build_contour_stack(
     xy_stride: int = 1,
     metrics: BuildMetrics | None = None,
     pixel_extractor: Callable[[np.ndarray], PixelLayerLoops] | None = None,
+    cancel_token: object | None = None,
 ) -> PwmbContourStack:
+    _raise_if_cancelled(cancel_token)
     op_id = get_op_id()
     emit_event(
         LOGGER_BUILD,
@@ -77,106 +81,142 @@ def build_contour_stack(
         decode_failures = 0
         decode_failure_samples: list[dict[str, object]] = []
         fail_fast = False
+        decode_io_mode = "per_layer_open"
         active_pixel_extractor = pixel_extractor or _extract_layer_loops
-        for layer_position, layer in enumerate(document.layers):
-            layers_processed += 1
-            decode_start = perf_counter()
-            try:
-                decoded = decode_layer(
-                    document,
-                    layer_position,
-                    threshold=None,
-                    strict=False,
-                    as_array=True,
-                )
-            except Exception as exc:
+        reader_context: object
+        try:
+            reader_context = open_layer_blob_reader(document)
+        except Exception as exc:
+            emit_event(
+                LOGGER_BUILD,
+                logging.WARNING,
+                event="pwmb.decode_reader_fallback",
+                msg="Persistent decode reader unavailable, fallback to per-layer open",
+                component="pwmb.decode",
+                op_id=op_id,
+                data={
+                    "pwmb": {"W": document.width, "H": document.height},
+                    "render3d": {"xy_stride": xy_step},
+                },
+                error={"type": type(exc).__name__, "message": str(exc)},
+            )
+            reader_context = nullcontext(None)
+
+        with reader_context as decode_reader:
+            if decode_reader is not None and hasattr(decode_reader, "mode"):
+                decode_io_mode = f"persistent_{getattr(decode_reader, 'mode')}"
+            for layer_position, layer in enumerate(document.layers):
+                _raise_if_cancelled(cancel_token)
+                layers_processed += 1
+                decode_start = perf_counter()
+                try:
+                    if binarization_mode == "index_strict":
+                        decoded = decode_layer_index_mask(
+                            document,
+                            layer_position,
+                            strict=False,
+                            as_array=True,
+                            reader=decode_reader,
+                        )
+                    else:
+                        decoded = decode_layer(
+                            document,
+                            layer_position,
+                            threshold=None,
+                            strict=False,
+                            as_array=True,
+                            reader=decode_reader,
+                        )
+                except Exception as exc:
+                    if metrics is not None:
+                        metrics.decode_ms_total += (perf_counter() - decode_start) * 1000.0
+                        metrics.layers_skipped += 1
+                    decode_failures += 1
+                    if len(decode_failure_samples) < _DECODE_FAILURE_SAMPLE_LIMIT:
+                        decode_failure_samples.append(
+                            {
+                                "layer_index": int(layer.index),
+                                "error_type": type(exc).__name__,
+                                "error_message": str(exc),
+                            }
+                        )
+                    if _should_abort_decode_failures(
+                        layers_processed=layers_processed,
+                        decode_failures=decode_failures,
+                    ):
+                        fail_fast = True
+                        break
+                    continue
+                _raise_if_cancelled(cancel_token)
+                decode_ms = (perf_counter() - decode_start) * 1000.0
                 if metrics is not None:
-                    metrics.decode_ms_total += (perf_counter() - decode_start) * 1000.0
-                    metrics.layers_skipped += 1
-                decode_failures += 1
-                if len(decode_failure_samples) < _DECODE_FAILURE_SAMPLE_LIMIT:
-                    decode_failure_samples.append(
-                        {
-                            "layer_index": int(layer.index),
-                            "error_type": type(exc).__name__,
-                            "error_message": str(exc),
-                        }
+                    metrics.decode_ms_total += decode_ms
+                    decoded_bytes += max(0, int(layer.data_length))
+                decoded_arr = decoded if isinstance(decoded, np.ndarray) else np.asarray(decoded, dtype=np.uint8)
+                if int(decoded_arr.size) != document.pixel_count:
+                    if metrics is not None:
+                        metrics.layers_skipped += 1
+                    continue
+
+                contour_start = perf_counter()
+                mask = _build_mask(
+                    values=decoded_arr,
+                    width=document.width,
+                    height=document.height,
+                    threshold=threshold,
+                    mode=binarization_mode,
+                    xy_stride=xy_step,
+                )
+                if not bool(mask.any()):
+                    if metrics is not None:
+                        metrics.contours_ms_total += (perf_counter() - contour_start) * 1000.0
+                        metrics.layers_skipped += 1
+                    continue
+
+                pixel_loops = active_pixel_extractor(mask)
+                if not pixel_loops.outer and not pixel_loops.holes:
+                    if metrics is not None:
+                        metrics.contours_ms_total += (perf_counter() - contour_start) * 1000.0
+                        metrics.layers_skipped += 1
+                    continue
+
+                world_outer = [
+                    _pixel_loop_to_world(
+                        loop,
+                        width=mask_width,
+                        height=mask_height,
+                        pitch_x_mm=pitch_x_mm,
+                        pitch_y_mm=pitch_y_mm,
                     )
-                if _should_abort_decode_failures(
-                    layers_processed=layers_processed,
-                    decode_failures=decode_failures,
-                ):
-                    fail_fast = True
-                    break
-                continue
-            decode_ms = (perf_counter() - decode_start) * 1000.0
-            if metrics is not None:
-                metrics.decode_ms_total += decode_ms
-                decoded_bytes += max(0, int(layer.data_length))
-            decoded_arr = decoded if isinstance(decoded, np.ndarray) else np.asarray(decoded, dtype=np.uint8)
-            if int(decoded_arr.size) != document.pixel_count:
-                if metrics is not None:
-                    metrics.layers_skipped += 1
-                continue
-
-            contour_start = perf_counter()
-            mask = _build_mask(
-                values=decoded_arr,
-                width=document.width,
-                height=document.height,
-                threshold=threshold,
-                mode=binarization_mode,
-                xy_stride=xy_step,
-            )
-            if not bool(mask.any()):
-                if metrics is not None:
-                    metrics.contours_ms_total += (perf_counter() - contour_start) * 1000.0
-                    metrics.layers_skipped += 1
-                continue
-
-            pixel_loops = active_pixel_extractor(mask)
-            if not pixel_loops.outer and not pixel_loops.holes:
-                if metrics is not None:
-                    metrics.contours_ms_total += (perf_counter() - contour_start) * 1000.0
-                    metrics.layers_skipped += 1
-                continue
-
-            world_outer = [
-                _pixel_loop_to_world(
-                    loop,
-                    width=mask_width,
-                    height=mask_height,
-                    pitch_x_mm=pitch_x_mm,
-                    pitch_y_mm=pitch_y_mm,
+                    for loop in pixel_loops.outer
+                ]
+                world_holes = [
+                    _pixel_loop_to_world(
+                        loop,
+                        width=mask_width,
+                        height=mask_height,
+                        pitch_x_mm=pitch_x_mm,
+                        pitch_y_mm=pitch_y_mm,
+                    )
+                    for loop in pixel_loops.holes
+                ]
+                layer_loops = LayerLoops(
+                    outer=[loop for loop in world_outer if len(loop) >= 3],
+                    holes=[loop for loop in world_holes if len(loop) >= 3],
                 )
-                for loop in pixel_loops.outer
-            ]
-            world_holes = [
-                _pixel_loop_to_world(
-                    loop,
-                    width=mask_width,
-                    height=mask_height,
-                    pitch_x_mm=pitch_x_mm,
-                    pitch_y_mm=pitch_y_mm,
-                )
-                for loop in pixel_loops.holes
-            ]
-            layer_loops = LayerLoops(
-                outer=[loop for loop in world_outer if len(loop) >= 3],
-                holes=[loop for loop in world_holes if len(loop) >= 3],
-            )
-            if not layer_loops.outer and not layer_loops.holes:
+                if not layer_loops.outer and not layer_loops.holes:
+                    if metrics is not None:
+                        metrics.contours_ms_total += (perf_counter() - contour_start) * 1000.0
+                        metrics.layers_skipped += 1
+                    continue
+                stack.layers[layer.index] = layer_loops
+                total_outer += len(layer_loops.outer)
+                total_holes += len(layer_loops.holes)
                 if metrics is not None:
                     metrics.contours_ms_total += (perf_counter() - contour_start) * 1000.0
-                    metrics.layers_skipped += 1
-                continue
-            stack.layers[layer.index] = layer_loops
-            total_outer += len(layer_loops.outer)
-            total_holes += len(layer_loops.holes)
-            if metrics is not None:
-                metrics.contours_ms_total += (perf_counter() - contour_start) * 1000.0
-                metrics.layers_built += 1
-                metrics.loops_total += len(layer_loops.outer) + len(layer_loops.holes)
+                    metrics.layers_built += 1
+                    metrics.loops_total += len(layer_loops.outer) + len(layer_loops.holes)
+                _raise_if_cancelled(cancel_token)
 
         if metrics is not None and metrics.decode_ms_total > 0.0:
             metrics.decode_mb_s = (
@@ -223,6 +263,7 @@ def build_contour_stack(
                     "outer_loops": total_outer,
                     "hole_loops": total_holes,
                     "xy_stride": xy_step,
+                    "decode_io_mode": decode_io_mode,
                     "fail_fast": fail_fast,
                 },
             },
@@ -239,11 +280,24 @@ def build_contour_stack(
                     "stage": "loops",
                     "layers_visible": len(stack.layers),
                     "xy_stride": xy_step,
+                    "decode_io_mode": decode_io_mode,
                     "fail_fast": fail_fast,
                 }
             },
         )
         return stack
+    except CancelledError as exc:
+        emit_event(
+            LOGGER_BUILD,
+            logging.WARNING,
+            event="build.stage_cancel",
+            msg="Contour extraction stage cancelled",
+            component="render3d.build",
+            op_id=op_id,
+            data={"render3d": {"stage": "mask"}},
+            error={"type": type(exc).__name__, "message": str(exc)},
+        )
+        raise
     except Exception as exc:
         emit_event(
             LOGGER_BUILD,
@@ -261,6 +315,14 @@ def build_contour_stack(
 def _extract_layer_loops(mask: np.ndarray) -> PixelLayerLoops:
     classified = _classify_loops(_extract_loops(mask))
     return PixelLayerLoops(outer=classified.outer, holes=classified.holes)
+
+
+def _raise_if_cancelled(cancel_token: object | None) -> None:
+    if cancel_token is None:
+        return
+    checker = getattr(cancel_token, "raise_if_cancelled", None)
+    if callable(checker):
+        checker()
 
 
 def _safe_pitch_xy(pixel_size_um: float) -> float:

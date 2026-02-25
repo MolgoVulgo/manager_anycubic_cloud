@@ -6,6 +6,7 @@ import re
 import struct
 from pathlib import Path
 import hashlib
+import threading
 
 import numpy as np
 
@@ -14,6 +15,7 @@ from pwmb_core.decode_pw0 import (
     PW0_VARIANT_BYTE_TOKEN,
     PW0_VARIANT_WORD16,
     decode_pw0_layer,
+    decode_pw0_nonzero_mask,
     normalize_pw0_variant,
 )
 from pwmb_core.decode_pws import PwsConvention, decode_pws_layer, select_pws_convention
@@ -24,6 +26,75 @@ from pwmb_core.types import PwmbDocument
 
 LOGGER_PARSE = logging.getLogger("pwmb.parse")
 LOGGER_DECODE = logging.getLogger("pwmb.decode")
+
+
+class LayerBlobReader:
+    """Persistent random-access reader for PWMB layer payloads."""
+
+    def __init__(self, path: str | Path) -> None:
+        self._path = Path(path)
+        self._handle = self._path.open("rb")
+        self._lock = threading.Lock()
+        self._mmap: mmap.mmap | None = None
+        self._mode = "handle"
+        self._size = int(self._path.stat().st_size)
+        try:
+            self._mmap = mmap.mmap(self._handle.fileno(), length=0, access=mmap.ACCESS_READ)
+            self._mode = "mmap"
+            self._size = len(self._mmap)
+        except Exception:
+            self._mmap = None
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    def read(self, offset: int, length: int) -> bytes:
+        start = int(offset)
+        count = int(length)
+        if count <= 0:
+            return b""
+        end = start + count
+        if start < 0 or end > self._size:
+            raise ValueError(
+                f"Layer blob read out of bounds: offset={start} length={count} size={self._size}"
+            )
+        if self._mmap is not None:
+            return bytes(self._mmap[start:end])
+        with self._lock:
+            self._handle.seek(start)
+            blob = self._handle.read(count)
+        if len(blob) != count:
+            raise ValueError(
+                f"Layer blob short read: offset={start} length={count} got={len(blob)} size={self._size}"
+            )
+        return blob
+
+    def close(self) -> None:
+        if self._mmap is not None:
+            try:
+                self._mmap.close()
+            finally:
+                self._mmap = None
+        try:
+            self._handle.close()
+        finally:
+            self._mode = "closed"
+
+    def __enter__(self) -> "LayerBlobReader":
+        return self
+
+    def __exit__(self, exc_type: object, exc: BaseException | None, tb: object) -> None:
+        self.close()
+
+
+def open_layer_blob_reader(path_or_document: Path | str | PwmbDocument) -> LayerBlobReader:
+    path = path_or_document.path if isinstance(path_or_document, PwmbDocument) else Path(path_or_document)
+    return LayerBlobReader(path)
 
 
 def read_pwmb_document(path: str | Path) -> PwmbDocument:
@@ -191,6 +262,7 @@ def decode_layer(
     convention: PwsConvention | None = None,
     strict: bool = True,
     as_array: bool = False,
+    reader: LayerBlobReader | None = None,
 ) -> list[int] | np.ndarray:
     op_id = get_op_id()
     if layer_index < 0 or layer_index >= len(document.layers):
@@ -249,9 +321,12 @@ def decode_layer(
             )
             return output
 
-        with document.path.open("rb") as handle:
-            handle.seek(layer.data_address)
-            blob = handle.read(layer.data_length)
+        if reader is not None:
+            blob = reader.read(layer.data_address, layer.data_length)
+        else:
+            with document.path.open("rb") as handle:
+                handle.seek(layer.data_address)
+                blob = handle.read(layer.data_length)
         if len(blob) != layer.data_length:
             raise ValueError(f"Unable to read complete layer payload: layer={layer_index}")
 
@@ -347,6 +422,134 @@ def decode_layer(
         raise
 
 
+def decode_layer_index_mask(
+    document: PwmbDocument,
+    layer_index: int,
+    *,
+    strict: bool = True,
+    as_array: bool = False,
+    reader: LayerBlobReader | None = None,
+) -> list[int] | np.ndarray:
+    op_id = get_op_id()
+    if layer_index < 0 or layer_index >= len(document.layers):
+        error = IndexError(f"Layer index out of range: {layer_index}")
+        emit_event(
+            LOGGER_DECODE,
+            logging.ERROR,
+            event="pwmb.decode_layer_fail",
+            msg="Layer index out of range",
+            component="pwmb.decode",
+            op_id=op_id,
+            data={"pwmb": {"layer_index": layer_index, "W": document.width, "H": document.height}},
+            error={"type": type(error).__name__, "message": str(error)},
+        )
+        raise error
+    if document.width <= 0 or document.height <= 0:
+        error = ValueError("PWMB document has invalid resolution")
+        emit_event(
+            LOGGER_DECODE,
+            logging.ERROR,
+            event="pwmb.decode_layer_fail",
+            msg="PWMB document has invalid resolution",
+            component="pwmb.decode",
+            op_id=op_id,
+            data={"pwmb": {"layer_index": layer_index, "W": document.width, "H": document.height}},
+            error={"type": type(error).__name__, "message": str(error)},
+        )
+        raise error
+
+    try:
+        layer = document.layers[layer_index]
+        pixel_count = document.pixel_count
+        if layer.data_length <= 0:
+            empty = np.zeros(pixel_count, dtype=np.uint8)
+            return empty if as_array else empty.tolist()
+
+        if reader is not None:
+            blob = reader.read(layer.data_address, layer.data_length)
+        else:
+            with document.path.open("rb") as handle:
+                handle.seek(layer.data_address)
+                blob = handle.read(layer.data_length)
+        if len(blob) != layer.data_length:
+            raise ValueError(f"Unable to read complete layer payload: layer={layer_index}")
+
+        format_name = document.machine.layer_image_format.lower()
+        if "pw0" in format_name:
+            previous_variant = document.pw0_variant
+            mask_arr, selected_variant = _decode_pw0_mask_adaptive(
+                document=document,
+                layer=layer,
+                blob=blob,
+                strict=strict,
+            )
+            decoder_name = f"pw0:{selected_variant}:index_mask"
+            if previous_variant != selected_variant:
+                emit_event(
+                    LOGGER_DECODE,
+                    logging.INFO,
+                    event="pwmb.decode_pw0_variant_selected",
+                    msg="PW0 variant selected/updated for index mask",
+                    component="pwmb.decode",
+                    op_id=op_id,
+                    data={
+                        "pwmb": {
+                            "layer_index": layer_index,
+                            "W": document.width,
+                            "H": document.height,
+                            "aa": max(1, document.header.anti_aliasing),
+                            "decoder": decoder_name,
+                            "pw0_variant_prev": previous_variant,
+                            "pw0_variant_new": selected_variant,
+                            "non_zero_expected": layer.non_zero_pixel_count,
+                            "non_zero_decoded": int(np.count_nonzero(mask_arr)),
+                        }
+                    },
+                )
+            emit_event(
+                LOGGER_DECODE,
+                logging.DEBUG,
+                event="pwmb.decode_layer_ok",
+                msg="PWMB layer index mask decoded",
+                component="pwmb.decode",
+                op_id=op_id,
+                data={
+                    "pwmb": {
+                        "layer_index": layer_index,
+                        "W": document.width,
+                        "H": document.height,
+                        "aa": max(1, document.header.anti_aliasing),
+                        "decoder": decoder_name,
+                    }
+                },
+            )
+            return mask_arr if as_array else mask_arr.tolist()
+
+        # For non-PW0 formats, decode intensity and derive material mask as fallback.
+        decoded = decode_layer(
+            document,
+            layer_index,
+            threshold=None,
+            strict=strict,
+            as_array=True,
+            reader=reader,
+        )
+        mask = np.where(decoded != 0, 255, 0).astype(np.uint8, copy=False)
+        return mask if as_array else mask.tolist()
+    except Exception as exc:
+        emit_event(
+            LOGGER_DECODE,
+            logging.ERROR,
+            event="pwmb.decode_layer_fail",
+            msg="PWMB layer index mask decoding failed",
+            component="pwmb.decode",
+            op_id=op_id,
+            data={"pwmb": {"layer_index": layer_index, "W": document.width, "H": document.height}},
+            error={"type": type(exc).__name__, "message": str(exc)},
+        )
+        raise
+
+
 def _decode_pw0_adaptive(
     *,
     document: PwmbDocument,
@@ -425,6 +628,82 @@ def _decode_pw0_adaptive(
     return selected_arr, selected_variant
 
 
+def _decode_pw0_mask_adaptive(
+    *,
+    document: PwmbDocument,
+    layer,
+    blob: bytes,
+    strict: bool,
+) -> tuple[np.ndarray, str]:
+    expected_non_zero = layer.non_zero_pixel_count
+    try:
+        preferred_variant = normalize_pw0_variant(document.pw0_variant)
+    except Exception:
+        preferred_variant = PW0_VARIANT_WORD16
+
+    selected_arr: np.ndarray | None = None
+    selected_variant = preferred_variant
+    primary_error = 2**31 - 1
+    selected_error = primary_error
+    primary_exc: Exception | None = None
+
+    alternate_variant = _other_pw0_variant(preferred_variant)
+    try:
+        primary_arr, primary_error = _decode_pw0_mask_variant_with_error(
+            blob=blob,
+            width=document.width,
+            height=document.height,
+            strict=strict,
+            variant=preferred_variant,
+            expected_non_zero=expected_non_zero,
+        )
+        selected_arr = primary_arr
+        selected_error = primary_error
+    except Exception as exc:
+        primary_exc = exc
+
+    should_probe_alternate = (
+        selected_arr is None
+        or document.pw0_variant is None
+        or _pw0_error_requires_probe(error=primary_error, expected_non_zero=expected_non_zero)
+    )
+    if should_probe_alternate:
+        try:
+            alt_arr, alt_error = _decode_pw0_mask_variant_with_error(
+                blob=blob,
+                width=document.width,
+                height=document.height,
+                strict=strict,
+                variant=alternate_variant,
+                expected_non_zero=expected_non_zero,
+            )
+        except Exception:
+            if selected_arr is None:
+                if primary_exc is not None:
+                    raise primary_exc
+                raise
+        else:
+            if selected_arr is None:
+                selected_arr = alt_arr
+                selected_variant = alternate_variant
+                selected_error = alt_error
+            elif _pw0_should_switch_variant(
+                primary_error=selected_error,
+                alternate_error=alt_error,
+                expected_non_zero=expected_non_zero,
+            ):
+                selected_arr = alt_arr
+                selected_variant = alternate_variant
+                selected_error = alt_error
+
+    if selected_arr is None:
+        if primary_exc is not None:
+            raise primary_exc
+        raise ValueError("PW0 index mask decoding failed with no available variant")
+    document.pw0_variant = selected_variant
+    return selected_arr, selected_variant
+
+
 def _decode_pw0_variant_with_error(
     *,
     blob: bytes,
@@ -440,6 +719,28 @@ def _decode_pw0_variant_with_error(
         width=width,
         height=height,
         lut=lut,
+        strict=strict,
+        as_array=True,
+        variant=variant,
+    )
+    non_zero = int(np.count_nonzero(decoded))
+    error = _pw0_non_zero_error(non_zero=non_zero, expected_non_zero=expected_non_zero)
+    return decoded, error
+
+
+def _decode_pw0_mask_variant_with_error(
+    *,
+    blob: bytes,
+    width: int,
+    height: int,
+    strict: bool,
+    variant: str,
+    expected_non_zero: int | None,
+) -> tuple[np.ndarray, int]:
+    decoded = decode_pw0_nonzero_mask(
+        blob=blob,
+        width=width,
+        height=height,
         strict=strict,
         as_array=True,
         variant=variant,

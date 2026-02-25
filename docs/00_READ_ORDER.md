@@ -13,6 +13,7 @@ Objectif : permettre une génération de code **déterministe** (Codex) en const
 4. 3D (contours→géométrie→renderer, puis GPU/perf/cache)
 5. UI (Files tab, Printer tab)
 6. Refactor guide & tests
+7. Lots migration C++ (40..52), dont runbook campagne `z1/xy1`
 
 ## Mapping depuis docs.zip (v1 -> v2)
 - Anycubic : 23/24/25/26/27/28/29/30 => 10..17

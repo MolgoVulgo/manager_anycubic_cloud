@@ -4,13 +4,19 @@ from collections import defaultdict
 import logging
 import math
 from time import perf_counter
+from typing import Callable
+
+import numpy as np
 
 from accloud_core.logging_contract import emit_event, get_op_id
 from render3d_core.perf import BuildMetrics
+from render3d_core.task_runner import CancelledError
 from render3d_core.types import LayerRange, Point2D, PwmbContourGeometry, PwmbContourStack
 
 
 Point3DLayer = tuple[float, float, float, float]
+Triangle2D = tuple[Point2D, Point2D, Point2D]
+TriangulationResult = list[Triangle2D] | dict[str, np.ndarray]
 LOGGER_BUILD = logging.getLogger("render3d.build")
 
 
@@ -22,7 +28,10 @@ def build_geometry_v2(
     max_xy_stride: int = 1,
     include_fill: bool = True,
     metrics: BuildMetrics | None = None,
+    triangulator: Callable[[list[Point2D], list[list[Point2D]]], TriangulationResult] | None = None,
+    cancel_token: object | None = None,
 ) -> PwmbContourGeometry:
+    _raise_if_cancelled(cancel_token)
     op_id = get_op_id()
     emit_event(
         LOGGER_BUILD,
@@ -43,6 +52,7 @@ def build_geometry_v2(
         start_ms = perf_counter()
         geometry = PwmbContourGeometry()
         if not stack.layers:
+            _finalize_contiguous_buffers(geometry, metrics=metrics)
             emit_event(
                 LOGGER_BUILD,
                 logging.INFO,
@@ -59,6 +69,7 @@ def build_geometry_v2(
         if max_layers is not None and max_layers > 0:
             layer_ids = layer_ids[: int(max_layers)]
         if not layer_ids:
+            _finalize_contiguous_buffers(geometry, metrics=metrics)
             emit_event(
                 LOGGER_BUILD,
                 logging.INFO,
@@ -75,6 +86,7 @@ def build_geometry_v2(
 
         stop_all = False
         for layer_id in layer_ids:
+            _raise_if_cancelled(cancel_token)
             layer_loops = stack.layers.get(layer_id)
             if layer_loops is None:
                 continue
@@ -90,9 +102,15 @@ def build_geometry_v2(
             if include_fill:
                 hole_map = _assign_holes_to_outers(outer_loops, hole_loops)
                 for outer_index, outer in enumerate(outer_loops):
+                    _raise_if_cancelled(cancel_token)
                     holes = hole_map.get(outer_index, [])
-                    triangles = _triangulate_polygon_with_holes(outer, holes)
-                    for a, b, c in triangles:
+                    triangulation_result = (
+                        triangulator(outer, holes)
+                        if triangulator is not None
+                        else _triangulate_polygon_with_holes(outer, holes)
+                    )
+                    for a, b, c in _iter_triangles(triangulation_result):
+                        _raise_if_cancelled(cancel_token)
                         if _would_exceed_budget(geometry, vertex_budget, additional=3):
                             stop_all = True
                             break
@@ -113,8 +131,10 @@ def build_geometry_v2(
             point_start = len(geometry.point_vertices)
             point_count = 0
             for loop in [*outer_loops, *hole_loops]:
+                _raise_if_cancelled(cancel_token)
                 size = len(loop)
                 for idx in range(size):
+                    _raise_if_cancelled(cancel_token)
                     if _would_exceed_budget(geometry, vertex_budget, additional=2):
                         stop_all = True
                         break
@@ -126,6 +146,7 @@ def build_geometry_v2(
                 if stop_all:
                     break
                 for point in loop:
+                    _raise_if_cancelled(cancel_token)
                     if _would_exceed_budget(geometry, vertex_budget, additional=1):
                         stop_all = True
                         break
@@ -143,6 +164,8 @@ def build_geometry_v2(
         triangulation_ms = (perf_counter() - start_ms) * 1000.0
         if metrics is not None:
             metrics.triangulation_ms_total += triangulation_ms
+        _finalize_contiguous_buffers(geometry, metrics=metrics)
+        if metrics is not None:
             metrics.triangles_total = len(geometry.triangle_vertices) // 3
             metrics.vertices_total = (
                 len(geometry.triangle_vertices)
@@ -168,6 +191,18 @@ def build_geometry_v2(
             },
         )
         return geometry
+    except CancelledError as exc:
+        emit_event(
+            LOGGER_BUILD,
+            logging.WARNING,
+            event="build.stage_cancel",
+            msg="Geometry build stage cancelled",
+            component="render3d.build",
+            op_id=op_id,
+            data={"render3d": {"stage": "triangulate"}},
+            error={"type": type(exc).__name__, "message": str(exc)},
+        )
+        raise
     except Exception as exc:
         emit_event(
             LOGGER_BUILD,
@@ -249,6 +284,99 @@ def _would_exceed_budget(
     return total + additional > budget
 
 
+def _raise_if_cancelled(cancel_token: object | None) -> None:
+    if cancel_token is None:
+        return
+    checker = getattr(cancel_token, "raise_if_cancelled", None)
+    if callable(checker):
+        checker()
+
+
+def _iter_triangles(result: TriangulationResult) -> list[Triangle2D]:
+    if isinstance(result, dict):
+        return _triangles_from_indexed_payload(result)
+    return result
+
+
+def _triangles_from_indexed_payload(payload: dict[str, np.ndarray]) -> list[Triangle2D]:
+    raw_vertices = payload.get("vertices")
+    raw_indices = payload.get("indices")
+    if raw_vertices is None or raw_indices is None:
+        return []
+
+    vertices = np.asarray(raw_vertices, dtype=np.float32)
+    indices = np.asarray(raw_indices, dtype=np.uint32)
+    if vertices.ndim != 2 or vertices.shape[1] != 2:
+        return []
+    if indices.ndim != 2 or indices.shape[1] != 3:
+        return []
+    if indices.size == 0 or vertices.size == 0:
+        return []
+
+    try:
+        flat_vertices = vertices[indices.reshape(-1)]
+    except Exception:
+        return []
+
+    triangles: list[Triangle2D] = []
+    for idx in range(0, int(flat_vertices.shape[0]), 3):
+        a = flat_vertices[idx]
+        b = flat_vertices[idx + 1]
+        c = flat_vertices[idx + 2]
+        triangles.append(
+            (
+                (float(a[0]), float(a[1])),
+                (float(b[0]), float(b[1])),
+                (float(c[0]), float(c[1])),
+            )
+        )
+    return triangles
+
+
+def _finalize_contiguous_buffers(geometry: PwmbContourGeometry, *, metrics: BuildMetrics | None) -> None:
+    start = perf_counter()
+    tri = _as_contiguous_vertices(geometry.triangle_vertices)
+    line = _as_contiguous_vertices(geometry.line_vertices)
+    point = _as_contiguous_vertices(geometry.point_vertices)
+    geometry.triangle_vertices = tri
+    geometry.line_vertices = line
+    geometry.point_vertices = point
+    geometry.triangle_indices = _sequential_indices(int(tri.shape[0]), width=3)
+    geometry.line_indices = _sequential_indices(int(line.shape[0]), width=2)
+    geometry.point_indices = _sequential_indices(int(point.shape[0]), width=1)
+    if metrics is not None:
+        metrics.buffers_ms_total += (perf_counter() - start) * 1000.0
+
+
+def _as_contiguous_vertices(vertices: list[Point3DLayer] | np.ndarray) -> np.ndarray:
+    if isinstance(vertices, np.ndarray):
+        if vertices.size == 0:
+            return np.zeros((0, 4), dtype=np.float32)
+        arr = vertices
+    else:
+        if not vertices:
+            return np.zeros((0, 4), dtype=np.float32)
+        arr = np.asarray(vertices, dtype=np.float32)
+    arr = np.asarray(arr, dtype=np.float32)
+    if arr.ndim == 1:
+        arr = arr.reshape((-1, 4))
+    elif arr.ndim != 2 or arr.shape[1] != 4:
+        arr = arr.reshape((-1, 4))
+    return np.ascontiguousarray(arr, dtype=np.float32)
+
+
+def _sequential_indices(vertex_count: int, *, width: int) -> np.ndarray:
+    count = max(0, int(vertex_count))
+    if width <= 0:
+        return np.zeros((0,), dtype=np.uint32)
+    if width == 1:
+        return np.arange(count, dtype=np.uint32)
+    usable = count - (count % width)
+    if usable <= 0:
+        return np.zeros((0, width), dtype=np.uint32)
+    return np.arange(usable, dtype=np.uint32).reshape((-1, width))
+
+
 def _assign_holes_to_outers(
     outers: list[list[Point2D]],
     holes: list[list[Point2D]],
@@ -282,6 +410,10 @@ def _triangulate_polygon_with_holes(
     if _loops_are_axis_aligned(loops):
         return _triangulate_axis_aligned_loops(loops)
 
+    scanline = _triangulate_scanline_loops(loops)
+    if scanline:
+        return scanline
+
     polygon = _ensure_orientation(outer, ccw=True)
     for hole in holes:
         hole_cw = _ensure_orientation(hole, ccw=False)
@@ -289,7 +421,10 @@ def _triangulate_polygon_with_holes(
         if merged is None:
             continue
         polygon = merged
-    return _ear_clip(polygon)
+    ear = _ear_clip(polygon)
+    if ear:
+        return ear
+    return _triangulate_scanline_loops(loops)
 
 
 def _loops_are_axis_aligned(loops: list[list[Point2D]], eps: float = 1e-12) -> bool:
@@ -344,6 +479,63 @@ def _triangulate_axis_aligned_loops(loops: list[list[Point2D]]) -> list[tuple[Po
             triangles.append(((x0, y0), (x1, y0), (x1, y1)))
             triangles.append(((x0, y0), (x1, y1), (x0, y1)))
     return triangles
+
+
+def _triangulate_scanline_loops(loops: list[list[Point2D]], eps: float = 1e-12) -> list[tuple[Point2D, Point2D, Point2D]]:
+    y_values = sorted({point[1] for loop in loops for point in loop})
+    if len(y_values) < 2:
+        return []
+
+    triangles: list[tuple[Point2D, Point2D, Point2D]] = []
+    for idx in range(len(y_values) - 1):
+        y0 = y_values[idx]
+        y1 = y_values[idx + 1]
+        if (y1 - y0) <= eps:
+            continue
+        y_mid = (y0 + y1) * 0.5
+        crossings: list[tuple[float, tuple[Point2D, Point2D]]] = []
+
+        for loop in loops:
+            size = len(loop)
+            for edge_idx in range(size):
+                p1 = loop[edge_idx]
+                p2 = loop[(edge_idx + 1) % size]
+                if abs(p1[1] - p2[1]) <= eps:
+                    continue
+                edge_y_min = min(p1[1], p2[1])
+                edge_y_max = max(p1[1], p2[1])
+                if edge_y_max <= y0 or edge_y_min >= y1:
+                    continue
+                x_mid = _x_at_y(p1, p2, y_mid)
+                crossings.append((x_mid, (p1, p2)))
+
+        crossings.sort(key=lambda item: item[0])
+        pair_count = len(crossings) // 2
+        for pair_idx in range(pair_count):
+            left_edge = crossings[pair_idx * 2][1]
+            right_edge = crossings[pair_idx * 2 + 1][1]
+            xl0 = _x_at_y(left_edge[0], left_edge[1], y0)
+            xl1 = _x_at_y(left_edge[0], left_edge[1], y1)
+            xr0 = _x_at_y(right_edge[0], right_edge[1], y0)
+            xr1 = _x_at_y(right_edge[0], right_edge[1], y1)
+
+            quad = ((xl0, y0), (xr0, y0), (xr1, y1), (xl1, y1))
+            tri1 = (quad[0], quad[1], quad[2])
+            tri2 = (quad[0], quad[2], quad[3])
+            if abs(_cross(tri1[0], tri1[1], tri1[2])) > eps:
+                triangles.append(tri1)
+            if abs(_cross(tri2[0], tri2[1], tri2[2])) > eps:
+                triangles.append(tri2)
+    return triangles
+
+
+def _x_at_y(p1: Point2D, p2: Point2D, y: float, eps: float = 1e-12) -> float:
+    y1 = p1[1]
+    y2 = p2[1]
+    if abs(y2 - y1) <= eps:
+        return min(p1[0], p2[0])
+    t = (y - y1) / (y2 - y1)
+    return p1[0] + t * (p2[0] - p1[0])
 
 
 def _merge_hole_into_polygon(outer: list[Point2D], hole: list[Point2D]) -> list[Point2D] | None:

@@ -11,6 +11,10 @@
 #include <utility>
 #include <vector>
 
+#ifdef PWMB_GEOM_WITH_OPENCV
+#include <opencv2/imgproc.hpp>
+#endif
+
 namespace pwmb_geom {
 
 namespace {
@@ -222,16 +226,151 @@ Loop2i to_loop(const std::vector<PointKey>& encoded_loop) {
     return loop;
 }
 
-}  // namespace
-
-PolygonSet extract_polygons(const std::uint8_t* data, int width, int height) {
-    if (data == nullptr) {
-        throw std::invalid_argument("extract_polygons: null mask pointer");
+PolygonSet classify_by_major_sign(std::vector<std::vector<PointKey>> loops) {
+    struct LoopArea {
+        std::vector<PointKey> loop;
+        double area;
+    };
+    std::vector<LoopArea> loop_areas;
+    loop_areas.reserve(loops.size());
+    for (auto& loop : loops) {
+        const double area = signed_area(loop);
+        if (loop.size() >= 3 && std::fabs(area) > 0.0) {
+            loop_areas.push_back(LoopArea{std::move(loop), area});
+        }
     }
-    if (width <= 0 || height <= 0) {
-        throw std::invalid_argument("extract_polygons: invalid mask shape");
+
+    PolygonSet output;
+    if (loop_areas.empty()) {
+        return output;
     }
 
+    std::size_t major_index = 0;
+    double major_abs = -std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < loop_areas.size(); ++i) {
+        const double abs_area = std::fabs(loop_areas[i].area);
+        if (abs_area > major_abs) {
+            major_abs = abs_area;
+            major_index = i;
+        }
+    }
+    const double major_sign = loop_areas[major_index].area >= 0.0 ? 1.0 : -1.0;
+
+    output.outer.reserve(loop_areas.size());
+    output.holes.reserve(loop_areas.size());
+    for (auto& item : loop_areas) {
+        const bool is_outer = (item.area >= 0.0 && major_sign > 0.0) || (item.area < 0.0 && major_sign < 0.0);
+        if (is_outer) {
+            output.outer.push_back(to_loop(item.loop));
+            continue;
+        }
+        output.holes.push_back(to_loop(item.loop));
+    }
+    return output;
+}
+
+#ifdef PWMB_GEOM_WITH_OPENCV
+int hierarchy_depth(int index, const std::vector<cv::Vec4i>& hierarchy) {
+    int depth = 0;
+    int parent = hierarchy[static_cast<std::size_t>(index)][3];
+    int guard = 0;
+    while (parent >= 0 && parent < static_cast<int>(hierarchy.size()) && guard < static_cast<int>(hierarchy.size())) {
+        ++depth;
+        parent = hierarchy[static_cast<std::size_t>(parent)][3];
+        ++guard;
+    }
+    return depth;
+}
+
+std::vector<PointKey> contour_to_grid_loop(const std::vector<cv::Point>& contour, int width, int height) {
+    std::vector<PointKey> encoded;
+    encoded.reserve(contour.size());
+    for (const cv::Point& point : contour) {
+        int x = static_cast<int>(std::lround(static_cast<double>(point.x) * 0.5));
+        int y = static_cast<int>(std::lround(static_cast<double>(point.y) * 0.5));
+        x = std::clamp(x, 0, width);
+        y = std::clamp(y, 0, height);
+        const PointKey key = encode_point(x, y);
+        if (encoded.empty() || encoded.back() != key) {
+            encoded.push_back(key);
+        }
+    }
+    if (encoded.size() >= 2 && encoded.front() == encoded.back()) {
+        encoded.pop_back();
+    }
+    return encoded;
+}
+
+PolygonSet extract_polygons_opencv_impl(const std::uint8_t* data, int width, int height) {
+    const int expanded_width = width * 2;
+    const int expanded_height = height * 2;
+    cv::Mat expanded(expanded_height, expanded_width, CV_8UC1, cv::Scalar(0));
+    for (int y = 0; y < height; ++y) {
+        const auto row_offset = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
+        for (int x = 0; x < width; ++x) {
+            if (data[row_offset + static_cast<std::size_t>(x)] == 0) {
+                continue;
+            }
+            expanded(cv::Rect(x * 2, y * 2, 2, 2)).setTo(cv::Scalar(255));
+        }
+    }
+
+    std::vector<std::vector<cv::Point>> contours;
+    std::vector<cv::Vec4i> hierarchy;
+    cv::findContours(expanded, contours, hierarchy, cv::RETR_CCOMP, cv::CHAIN_APPROX_SIMPLE);
+    if (contours.empty()) {
+        return {};
+    }
+
+    struct LoopWithDepth {
+        std::vector<PointKey> loop;
+        int depth;
+    };
+    std::vector<LoopWithDepth> loops;
+    loops.reserve(contours.size());
+
+    const bool has_hierarchy = hierarchy.size() == contours.size();
+    for (std::size_t i = 0; i < contours.size(); ++i) {
+        std::vector<PointKey> loop = contour_to_grid_loop(contours[i], width, height);
+        if (loop.size() < 3) {
+            continue;
+        }
+        loop = simplify_collinear(loop);
+        if (loop.size() < 3 || std::fabs(signed_area(loop)) <= 0.0) {
+            continue;
+        }
+        loops.push_back(LoopWithDepth{
+            std::move(loop),
+            has_hierarchy ? hierarchy_depth(static_cast<int>(i), hierarchy) : 0,
+        });
+    }
+    if (loops.empty()) {
+        return {};
+    }
+    if (!has_hierarchy) {
+        std::vector<std::vector<PointKey>> fallback_loops;
+        fallback_loops.reserve(loops.size());
+        for (auto& item : loops) {
+            fallback_loops.push_back(std::move(item.loop));
+        }
+        return classify_by_major_sign(std::move(fallback_loops));
+    }
+
+    PolygonSet output;
+    output.outer.reserve(loops.size());
+    output.holes.reserve(loops.size());
+    for (const auto& item : loops) {
+        if ((item.depth & 1) == 0) {
+            output.outer.push_back(to_loop(item.loop));
+        } else {
+            output.holes.push_back(to_loop(item.loop));
+        }
+    }
+    return output;
+}
+#endif
+
+PolygonSet extract_polygons_native_impl(const std::uint8_t* data, int width, int height) {
     std::unordered_map<EdgeKey, std::pair<PointKey, PointKey>, EdgeKeyHash> edges;
     edges.reserve(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
 
@@ -289,47 +428,39 @@ PolygonSet extract_polygons(const std::uint8_t* data, int width, int height) {
             }
         }
     }
+    return classify_by_major_sign(std::move(loops));
+}
 
-    struct LoopArea {
-        std::vector<PointKey> loop;
-        double area;
-    };
-    std::vector<LoopArea> loop_areas;
-    loop_areas.reserve(loops.size());
-    for (auto& loop : loops) {
-        const double area = signed_area(loop);
-        if (loop.size() >= 3 && std::fabs(area) > 0.0) {
-            loop_areas.push_back(LoopArea{std::move(loop), area});
-        }
+}  // namespace
+
+PolygonSet extract_polygons(const std::uint8_t* data, int width, int height, ContourImpl impl) {
+    if (data == nullptr) {
+        throw std::invalid_argument("extract_polygons: null mask pointer");
+    }
+    if (width <= 0 || height <= 0) {
+        throw std::invalid_argument("extract_polygons: invalid mask shape");
     }
 
-    PolygonSet output;
-    if (loop_areas.empty()) {
-        return output;
+    switch (impl) {
+        case ContourImpl::kNative:
+            return extract_polygons_native_impl(data, width, height);
+        case ContourImpl::kOpenCV:
+#ifdef PWMB_GEOM_WITH_OPENCV
+            return extract_polygons_opencv_impl(data, width, height);
+#else
+            throw std::runtime_error(
+                "extract_polygons: OpenCV contours requested but module was built without WITH_OPENCV");
+#endif
     }
+    return extract_polygons_native_impl(data, width, height);
+}
 
-    std::size_t major_index = 0;
-    double major_abs = -std::numeric_limits<double>::infinity();
-    for (std::size_t i = 0; i < loop_areas.size(); ++i) {
-        const double abs_area = std::fabs(loop_areas[i].area);
-        if (abs_area > major_abs) {
-            major_abs = abs_area;
-            major_index = i;
-        }
-    }
-    const double major_sign = loop_areas[major_index].area >= 0.0 ? 1.0 : -1.0;
-
-    output.outer.reserve(loop_areas.size());
-    output.holes.reserve(loop_areas.size());
-    for (auto& item : loop_areas) {
-        const bool is_outer = (item.area >= 0.0 && major_sign > 0.0) || (item.area < 0.0 && major_sign < 0.0);
-        if (is_outer) {
-            output.outer.push_back(to_loop(item.loop));
-            continue;
-        }
-        output.holes.push_back(to_loop(item.loop));
-    }
-    return output;
+bool opencv_contours_available() noexcept {
+#ifdef PWMB_GEOM_WITH_OPENCV
+    return true;
+#else
+    return false;
+#endif
 }
 
 }  // namespace pwmb_geom

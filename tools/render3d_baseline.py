@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from time import perf_counter
 
@@ -57,39 +58,51 @@ def _run_case(
     max_layers: int | None,
     max_vertices: int | None,
     max_xy_stride: int,
+    cpp_contours_impl: str | None,
 ) -> dict[str, object]:
     metrics = BuildMetrics(pool_kind="threads", workers=1)
     parse_start = perf_counter()
     document = read_pwmb_document(pwmb_path)
     metrics.parse_ms = (perf_counter() - parse_start) * 1000.0
 
-    backend = resolve_geometry_backend(preferred=backend_name)
-    signature = compute_file_signature(pwmb_path)
-    effective_xy_stride = xy_stride or _select_preview_xy_stride(width=document.width, height=document.height)
-    build_result = build_geometry_pipeline(
-        document,
-        threshold=threshold,
-        bin_mode=bin_mode,
-        xy_stride=effective_xy_stride,
-        z_stride=max(1, int(z_stride)),
-        max_layers=max_layers,
-        max_vertices=max_vertices,
-        max_xy_stride=max_xy_stride,
-        file_signature=signature,
-        backend=backend,
-        cache=None,
-        metrics=metrics,
-    )
+    prev_cpp_impl = os.getenv("GEOM_CPP_CONTOURS_IMPL")
+    cpp_impl_effective: str | None = None
+    if cpp_contours_impl is not None:
+        os.environ["GEOM_CPP_CONTOURS_IMPL"] = str(cpp_contours_impl)
+    try:
+        backend = resolve_geometry_backend(preferred=backend_name)
+        signature = compute_file_signature(pwmb_path)
+        effective_xy_stride = xy_stride or _select_preview_xy_stride(width=document.width, height=document.height)
+        build_result = build_geometry_pipeline(
+            document,
+            threshold=threshold,
+            bin_mode=bin_mode,
+            xy_stride=effective_xy_stride,
+            z_stride=max(1, int(z_stride)),
+            max_layers=max_layers,
+            max_vertices=max_vertices,
+            max_xy_stride=max_xy_stride,
+            file_signature=signature,
+            backend=backend,
+            cache=None,
+            metrics=metrics,
+        )
+        if build_result.backend_name == "cpp":
+            module = getattr(backend, "module", None)
+            getter = getattr(module, "current_contours_impl", None)
+            if callable(getter):
+                try:
+                    cpp_impl_effective = str(getter())
+                except Exception:
+                    cpp_impl_effective = None
+    finally:
+        if cpp_contours_impl is not None:
+            if prev_cpp_impl is None:
+                os.environ.pop("GEOM_CPP_CONTOURS_IMPL", None)
+            else:
+                os.environ["GEOM_CPP_CONTOURS_IMPL"] = prev_cpp_impl
     contour_stack = build_result.contour_stack
     geometry = build_result.geometry
-
-    buffer_start = perf_counter()
-    _ = (
-        len(geometry.triangle_vertices) * 16
-        + len(geometry.line_vertices) * 16
-        + len(geometry.point_vertices) * 16
-    )
-    metrics.buffers_ms_total += (perf_counter() - buffer_start) * 1000.0
 
     invariants = build_invariant_snapshot(contour_stack, geometry)
     payload = {
@@ -105,6 +118,8 @@ def _run_case(
         "max_xy_stride": int(max_xy_stride),
         "metrics": metrics.as_log_data(),
         "invariants": invariants.as_dict(),
+        "cpp_contours_impl_requested": str(cpp_contours_impl) if cpp_contours_impl is not None else None,
+        "cpp_contours_impl_effective": cpp_impl_effective,
     }
     return payload
 
@@ -132,6 +147,12 @@ def main() -> int:
     parser.add_argument("--max-layers", type=int, default=None, help="Optional layer budget.")
     parser.add_argument("--max-vertices", type=int, default=None, help="Optional vertex budget.")
     parser.add_argument("--max-xy-stride", type=int, default=1, help="Geometry simplification stride.")
+    parser.add_argument(
+        "--cpp-contours-impl",
+        default=None,
+        choices=["native", "opencv", "auto"],
+        help="C++ contour implementation selector (only used with --backend cpp).",
+    )
     parser.add_argument("--output", type=Path, default=None, help="Write JSON report to this path.")
     args = parser.parse_args()
 
@@ -159,6 +180,7 @@ def main() -> int:
                     max_layers=max(1, int(args.max_layers)) if args.max_layers is not None else None,
                     max_vertices=max(1, int(args.max_vertices)) if args.max_vertices is not None else None,
                     max_xy_stride=max(1, int(args.max_xy_stride)),
+                    cpp_contours_impl=str(args.cpp_contours_impl) if args.cpp_contours_impl is not None else None,
                 )
             except Exception as exc:
                 errors.append({"file": str(file_path), "error": f"{type(exc).__name__}: {exc}"})

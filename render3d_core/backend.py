@@ -32,6 +32,7 @@ class GeometryBackend(Protocol):
         binarization_mode: str,
         xy_stride: int,
         metrics: BuildMetrics | None = None,
+        cancel_token: object | None = None,
     ) -> PwmbContourStack:
         ...
 
@@ -44,6 +45,7 @@ class GeometryBackend(Protocol):
         max_xy_stride: int,
         include_fill: bool = True,
         metrics: BuildMetrics | None = None,
+        cancel_token: object | None = None,
     ) -> PwmbContourGeometry:
         ...
 
@@ -64,6 +66,7 @@ class PythonGeometryBackend:
         binarization_mode: str,
         xy_stride: int,
         metrics: BuildMetrics | None = None,
+        cancel_token: object | None = None,
     ) -> PwmbContourStack:
         return build_contour_stack(
             document=document,
@@ -71,6 +74,7 @@ class PythonGeometryBackend:
             binarization_mode=binarization_mode,
             xy_stride=xy_stride,
             metrics=metrics,
+            cancel_token=cancel_token,
         )
 
     def build_geometry(
@@ -82,6 +86,7 @@ class PythonGeometryBackend:
         max_xy_stride: int,
         include_fill: bool = True,
         metrics: BuildMetrics | None = None,
+        cancel_token: object | None = None,
     ) -> PwmbContourGeometry:
         return build_geometry_v2(
             contour_stack,
@@ -90,6 +95,7 @@ class PythonGeometryBackend:
             max_xy_stride=max_xy_stride,
             include_fill=include_fill,
             metrics=metrics,
+            cancel_token=cancel_token,
         )
 
 
@@ -110,16 +116,32 @@ class CppGeometryBackend:
         binarization_mode: str,
         xy_stride: int,
         metrics: BuildMetrics | None = None,
+        cancel_token: object | None = None,
     ) -> PwmbContourStack:
         if not hasattr(self.module, "build_contours"):
             raise RuntimeError("pwmb_geom backend missing build_contours")
-        return self.module.build_contours(  # type: ignore[no-any-return]
-            document=document,
-            threshold=threshold,
-            binarization_mode=binarization_mode,
-            xy_stride=xy_stride,
-            metrics=metrics,
-        )
+        kwargs: dict[str, object] = {
+            "document": document,
+            "threshold": threshold,
+            "binarization_mode": binarization_mode,
+            "xy_stride": xy_stride,
+            "metrics": metrics,
+        }
+        if cancel_token is not None:
+            kwargs["cancel_token"] = cancel_token
+        try:
+            return self.module.build_contours(**kwargs)  # type: ignore[no-any-return]
+        except TypeError:
+            # Backward compatibility with older pybind modules.
+            if cancel_token is None:
+                raise
+            return self.module.build_contours(  # type: ignore[no-any-return]
+                document=document,
+                threshold=threshold,
+                binarization_mode=binarization_mode,
+                xy_stride=xy_stride,
+                metrics=metrics,
+            )
 
     def build_geometry(
         self,
@@ -130,17 +152,34 @@ class CppGeometryBackend:
         max_xy_stride: int,
         include_fill: bool = True,
         metrics: BuildMetrics | None = None,
+        cancel_token: object | None = None,
     ) -> PwmbContourGeometry:
         if not hasattr(self.module, "build_geometry"):
             raise RuntimeError("pwmb_geom backend missing build_geometry")
-        return self.module.build_geometry(  # type: ignore[no-any-return]
-            contour_stack=contour_stack,
-            max_layers=max_layers,
-            max_vertices=max_vertices,
-            max_xy_stride=max_xy_stride,
-            include_fill=include_fill,
-            metrics=metrics,
-        )
+        kwargs: dict[str, object] = {
+            "contour_stack": contour_stack,
+            "max_layers": max_layers,
+            "max_vertices": max_vertices,
+            "max_xy_stride": max_xy_stride,
+            "include_fill": include_fill,
+            "metrics": metrics,
+        }
+        if cancel_token is not None:
+            kwargs["cancel_token"] = cancel_token
+        try:
+            return self.module.build_geometry(**kwargs)  # type: ignore[no-any-return]
+        except TypeError:
+            # Backward compatibility with older pybind modules.
+            if cancel_token is None:
+                raise
+            return self.module.build_geometry(  # type: ignore[no-any-return]
+                contour_stack=contour_stack,
+                max_layers=max_layers,
+                max_vertices=max_vertices,
+                max_xy_stride=max_xy_stride,
+                include_fill=include_fill,
+                metrics=metrics,
+            )
 
 
 def resolve_geometry_backend(*, preferred: str | None = None) -> GeometryBackend:

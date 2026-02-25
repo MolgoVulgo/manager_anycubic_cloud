@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pwmb_core.decode_pw0 import Pw0DecodeError, decode_pw0_layer
+from pwmb_core.decode_pw0 import Pw0DecodeError, decode_pw0_layer, decode_pw0_nonzero_mask
 from pwmb_core.decode_pws import PwsConvention, PwsDecodeError, decode_pws_layer, select_pws_convention
 from pwmb_core.lut import map_color_index_to_intensity, parse_layer_image_color_table
 
@@ -54,6 +54,16 @@ def test_decode_pw0_can_return_numpy_array() -> None:
     assert isinstance(decoded, np.ndarray)
     assert decoded.dtype == np.uint8
     assert decoded.tolist() == [51, 51]
+
+
+def test_decode_pw0_nonzero_mask_uses_color_index_not_intensity() -> None:
+    blob = _pw0_word(2, 2)
+    lut = [0] * 16
+    lut[2] = 0
+    decoded = decode_pw0_layer(blob=blob, width=2, height=1, lut=lut)
+    mask = decode_pw0_nonzero_mask(blob=blob, width=2, height=1)
+    assert decoded == [0, 0]
+    assert mask == [255, 255]
 
 
 def test_decode_pw0_byte_token_variant_decodes_runs() -> None:

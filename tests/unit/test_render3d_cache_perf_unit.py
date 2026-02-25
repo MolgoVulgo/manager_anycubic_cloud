@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from app_gui_qt.dialogs.pwmb3d_dialog import (
+    _camera_pose_for_orbit,
     _select_preview_xy_stride,
     _select_preview_xy_stride_for_complexity,
     _select_preview_z_stride,
+    _sort_layers_back_to_front,
 )
 from pwmb_core.types import HeaderInfo, LayerDef, MachineInfo, PwmbDocument
 from render3d_core.cache import compute_file_signature, make_cache_key
@@ -141,3 +145,52 @@ def test_select_preview_xy_stride_scales_for_heavy_complexity() -> None:
 def test_select_preview_z_stride_scales_for_heavy_complexity() -> None:
     assert _select_preview_z_stride(layer_count=398, width=5760, height=3600) == 1
     assert _select_preview_z_stride(layer_count=585, width=5760, height=3600) == 3
+
+
+def test_sort_layers_back_to_front_changes_with_camera_orientation() -> None:
+    layers = [0, 1, 2]
+    layer_z = {0: 0.0, 1: 1.0, 2: 2.0}
+    center = (0.0, 0.0, 1.0)
+
+    front_view = _sort_layers_back_to_front(
+        layer_ids=layers,
+        layer_z=layer_z,
+        center=center,
+        distance=10.0,
+        yaw_deg=0.0,
+        pitch_deg=0.0,
+    )
+    back_view = _sort_layers_back_to_front(
+        layer_ids=layers,
+        layer_z=layer_z,
+        center=center,
+        distance=10.0,
+        yaw_deg=180.0,
+        pitch_deg=0.0,
+    )
+
+    assert front_view == [0, 1, 2]
+    assert back_view == [2, 1, 0]
+
+
+def test_sort_layers_back_to_front_stable_tie_break_on_layer_id() -> None:
+    ordered = _sort_layers_back_to_front(
+        layer_ids=[7, 2, 5],
+        layer_z={7: 1.0, 2: 1.0, 5: 1.0},
+        center=(0.0, 0.0, 1.0),
+        distance=5.0,
+        yaw_deg=0.0,
+        pitch_deg=0.0,
+    )
+    assert ordered == [2, 5, 7]
+
+
+def test_camera_pose_for_orbit_returns_normalized_forward_vector() -> None:
+    _camera, forward = _camera_pose_for_orbit(
+        center=(0.0, 0.0, 0.0),
+        distance=3.5,
+        yaw_deg=25.0,
+        pitch_deg=-15.0,
+    )
+    norm = (forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2]) ** 0.5
+    assert norm == pytest.approx(1.0, rel=1e-6)

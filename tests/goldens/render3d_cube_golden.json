@@ -1,0 +1,24 @@
+{
+  "file": "pwmb_files/cube.pwmb",
+  "backend": "python",
+  "params": {
+    "threshold": 1,
+    "bin_mode": "index_strict",
+    "xy_stride": 2,
+    "z_stride": 4,
+    "include_fill": true
+  },
+  "invariants": {
+    "contour_area_mm2": 4976.029241,
+    "mesh_area_mm2": 4976.029587,
+    "contour_bbox": [-5.02240022277832, -5.02240022277832, 4.953600219726563, 4.953600219726563],
+    "mesh_bbox": [-5.022400379180908, -5.022400379180908, -4.900000095367432, 4.9536004066467285, 4.9536004066467285, 4.900000095367432],
+    "triangle_count": 100,
+    "degenerate_triangles": 0
+  },
+  "checksums": {
+    "tri_md5": "dcdea677125f7082570d15e21e77d6a2",
+    "line_md5": "845380faa64578c2ed69f528b60b75f3",
+    "point_md5": "836854511d443912d25333e0bbf6a8fe"
+  }
+}

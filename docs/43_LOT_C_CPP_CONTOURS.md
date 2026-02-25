@@ -9,6 +9,8 @@ Lot C implements phase C from `docs/40_update_to_cpp.md`:
 Current status:
 - contours extraction path can be native when `_pwmb_geom` is built,
 - geometry triangulation remains Python (`build_geometry_v2`) in this lot.
+- functional fixes applied after lot C (PW0 adaptive decode, cutoff observability) are tracked in `docs/44_CORRECTIONS_FONCTIONNELLES.md`.
+- optional OpenCV contour extractor planning is tracked in `docs/45_LOT_D_OPENCV_OPTION.md`.
 
 ## Added files
 

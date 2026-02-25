@@ -12,6 +12,7 @@ from pwmb_core.types import HeaderInfo, LayerDef, MachineInfo, PwmbDocument
 from render3d_core.contours import PixelLayerLoops, build_contour_stack
 from render3d_core.geometry_v2 import build_geometry_v2
 from render3d_core.perf import BuildMetrics
+from render3d_core.task_runner import CancellationToken, CancelledError
 from render3d_core.types import LayerLoops, PwmbContourStack
 
 
@@ -52,6 +53,15 @@ def _triangles_area(vertices: list[tuple[float, float, float, float]]) -> float:
     return area
 
 
+def _stack_area_mm2(stack: PwmbContourStack) -> float:
+    total = 0.0
+    for loops in stack.layers.values():
+        outer = sum(abs(_polygon_area(loop)) for loop in loops.outer)
+        holes = sum(abs(_polygon_area(loop)) for loop in loops.holes)
+        total += max(0.0, outer - holes)
+    return total
+
+
 class _CaptureHandler(logging.Handler):
     def __init__(self) -> None:
         super().__init__()
@@ -73,6 +83,7 @@ def test_build_contour_stack_detects_outer_and_hole(monkeypatch: pytest.MonkeyPa
     ]
 
     monkeypatch.setattr("render3d_core.contours.decode_layer", lambda *_args, **_kwargs: decoded)
+    monkeypatch.setattr("render3d_core.contours.decode_layer_index_mask", lambda *_args, **_kwargs: decoded)
     stack = build_contour_stack(document, threshold=128, binarization_mode="index_strict")
 
     assert 0 in stack.layers
@@ -86,6 +97,10 @@ def test_build_contour_stack_threshold_mode_is_distinct(monkeypatch: pytest.Monk
     document = _make_document(width=3, height=1, layers=1)
     decoded = [0, 120, 200]
     monkeypatch.setattr("render3d_core.contours.decode_layer", lambda *_args, **_kwargs: decoded)
+    monkeypatch.setattr(
+        "render3d_core.contours.decode_layer_index_mask",
+        lambda *_args, **_kwargs: [0, 255, 255],
+    )
 
     threshold_stack = build_contour_stack(document, threshold=128, binarization_mode="threshold")
     index_stack = build_contour_stack(document, threshold=128, binarization_mode="index_strict")
@@ -105,6 +120,7 @@ def test_build_contour_stack_reports_decode_failure_summary(monkeypatch: pytest.
         return decoded
 
     monkeypatch.setattr("render3d_core.contours.decode_layer", _decode)
+    monkeypatch.setattr("render3d_core.contours.decode_layer_index_mask", _decode)
     handler = _CaptureHandler()
     handler.setFormatter(JsonLineFormatter())
     root = logging.getLogger()
@@ -134,6 +150,7 @@ def test_build_contour_stack_fail_fast_stops_after_many_errors(monkeypatch: pyte
         raise ValueError("broken")
 
     monkeypatch.setattr("render3d_core.contours.decode_layer", _decode)
+    monkeypatch.setattr("render3d_core.contours.decode_layer_index_mask", _decode)
     stack = build_contour_stack(document, threshold=1, binarization_mode="index_strict", metrics=metrics)
 
     assert not stack.layers
@@ -152,6 +169,7 @@ def test_build_contour_stack_xy_stride_preserves_world_size(monkeypatch: pytest.
         dtype=np.uint8,
     )
     monkeypatch.setattr("render3d_core.contours.decode_layer", lambda *_args, **_kwargs: decoded)
+    monkeypatch.setattr("render3d_core.contours.decode_layer_index_mask", lambda *_args, **_kwargs: decoded)
 
     stack_full = build_contour_stack(document, threshold=1, binarization_mode="index_strict", xy_stride=1)
     stack_down = build_contour_stack(document, threshold=1, binarization_mode="index_strict", xy_stride=2)
@@ -173,6 +191,7 @@ def test_build_contour_stack_accepts_custom_pixel_extractor(monkeypatch: pytest.
         dtype=np.uint8,
     )
     monkeypatch.setattr("render3d_core.contours.decode_layer", lambda *_args, **_kwargs: decoded)
+    monkeypatch.setattr("render3d_core.contours.decode_layer_index_mask", lambda *_args, **_kwargs: decoded)
 
     calls = {"count": 0}
 
@@ -197,6 +216,33 @@ def test_build_contour_stack_accepts_custom_pixel_extractor(monkeypatch: pytest.
     assert len(stack.layers[0].holes) == 0
 
 
+def test_build_contour_stack_reuses_persistent_decode_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    document = _make_document(width=2, height=2, layers=3)
+    decoded = np.asarray([255, 255, 255, 255], dtype=np.uint8)
+    reader = object()
+    seen_readers: list[object | None] = []
+
+    class _ReaderContext:
+        def __enter__(self):
+            return reader
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return None
+
+    def _decode(_document, _layer_index: int, **kwargs):
+        seen_readers.append(kwargs.get("reader"))
+        return decoded
+
+    monkeypatch.setattr("render3d_core.contours.open_layer_blob_reader", lambda _document: _ReaderContext())
+    monkeypatch.setattr("render3d_core.contours.decode_layer", _decode)
+    monkeypatch.setattr("render3d_core.contours.decode_layer_index_mask", _decode)
+
+    stack = build_contour_stack(document, threshold=1, binarization_mode="index_strict")
+
+    assert sorted(stack.layers.keys()) == [0, 1, 2]
+    assert seen_readers == [reader, reader, reader]
+
+
 def test_build_contour_stack_decodes_sampled_layers_by_position(monkeypatch: pytest.MonkeyPatch) -> None:
     document = _make_document(width=2, height=2, layers=3)
     document.layers = [
@@ -212,10 +258,36 @@ def test_build_contour_stack_decodes_sampled_layers_by_position(monkeypatch: pyt
         return decoded
 
     monkeypatch.setattr("render3d_core.contours.decode_layer", _decode)
+    monkeypatch.setattr("render3d_core.contours.decode_layer_index_mask", _decode)
     stack = build_contour_stack(document, threshold=1, binarization_mode="index_strict")
 
     assert seen_positions == [0, 1, 2]
     assert sorted(stack.layers.keys()) == [0, 10, 20]
+
+
+def test_build_contour_stack_honors_cancellation_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    document = _make_document(width=2, height=2, layers=3)
+    decoded = np.asarray([255, 255, 255, 255], dtype=np.uint8)
+    token = CancellationToken()
+    decode_calls = {"count": 0}
+
+    def _decode(_document, _layer_index: int, **_kwargs):
+        decode_calls["count"] += 1
+        token.cancel()
+        return decoded
+
+    monkeypatch.setattr("render3d_core.contours.decode_layer", _decode)
+    monkeypatch.setattr("render3d_core.contours.decode_layer_index_mask", _decode)
+
+    with pytest.raises(CancelledError):
+        _ = build_contour_stack(
+            document,
+            threshold=1,
+            binarization_mode="index_strict",
+            cancel_token=token,
+        )
+
+    assert decode_calls["count"] == 1
 
 
 def test_build_geometry_v2_generates_ranges_and_vertices() -> None:
@@ -277,6 +349,101 @@ def test_build_geometry_v2_hole_reduces_filled_area() -> None:
     geometry = build_geometry_v2(stack)
     area = _triangles_area(geometry.triangle_vertices)
     assert 10.0 < area < 14.0
+
+
+def test_build_geometry_v2_non_axis_aligned_holes_preserve_area() -> None:
+    stack = PwmbContourStack(
+        pitch_x_mm=0.1,
+        pitch_y_mm=0.1,
+        pitch_z_mm=0.1,
+        layers={
+            0: LayerLoops(
+                outer=[
+                    [
+                        (-3.0, 0.0),
+                        (-1.0, -2.5),
+                        (2.5, -2.0),
+                        (4.5, 0.8),
+                        (3.8, 3.5),
+                        (1.2, 4.8),
+                        (-2.4, 3.7),
+                    ]
+                ],
+                holes=[
+                    [(0.2, -0.9), (1.4, -0.2), (0.9, 1.0), (-0.1, 0.2)],
+                    [(1.8, 1.1), (2.9, 1.7), (2.3, 2.8), (1.3, 2.1)],
+                ],
+            )
+        },
+    )
+
+    geometry = build_geometry_v2(stack)
+    area_mesh = _triangles_area(geometry.triangle_vertices)
+    area_contour = _stack_area_mm2(stack)
+
+    assert area_mesh == pytest.approx(area_contour, rel=1e-4)
+    assert len(geometry.triangle_vertices) >= 6
+
+
+def test_build_geometry_v2_materializes_contiguous_buffers_and_indices() -> None:
+    stack = PwmbContourStack(
+        pitch_x_mm=0.1,
+        pitch_y_mm=0.1,
+        pitch_z_mm=0.05,
+        layers={
+            2: LayerLoops(
+                outer=[[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]],
+                holes=[],
+            )
+        },
+    )
+    metrics = BuildMetrics()
+    geometry = build_geometry_v2(stack, metrics=metrics)
+
+    assert isinstance(geometry.triangle_vertices, np.ndarray)
+    assert isinstance(geometry.line_vertices, np.ndarray)
+    assert isinstance(geometry.point_vertices, np.ndarray)
+    assert geometry.triangle_vertices.dtype == np.float32
+    assert geometry.line_vertices.dtype == np.float32
+    assert geometry.point_vertices.dtype == np.float32
+    assert geometry.triangle_vertices.flags["C_CONTIGUOUS"]
+    assert geometry.line_vertices.flags["C_CONTIGUOUS"]
+    assert geometry.point_vertices.flags["C_CONTIGUOUS"]
+    assert geometry.triangle_indices is not None
+    assert geometry.line_indices is not None
+    assert geometry.point_indices is not None
+    assert geometry.triangle_indices.dtype == np.uint32
+    assert geometry.line_indices.dtype == np.uint32
+    assert geometry.point_indices.dtype == np.uint32
+    assert geometry.triangle_indices.shape[1] == 3
+    assert geometry.line_indices.shape[1] == 2
+    assert metrics.buffers_ms_total >= 0.0
+
+
+def test_build_geometry_v2_honors_cancellation_token() -> None:
+    stack = PwmbContourStack(
+        pitch_x_mm=0.1,
+        pitch_y_mm=0.1,
+        pitch_z_mm=0.05,
+        layers={
+            0: LayerLoops(
+                outer=[[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]],
+                holes=[],
+            )
+        },
+    )
+    token = CancellationToken()
+
+    def _triangulator(*_args, **_kwargs):
+        token.cancel()
+        return []
+
+    with pytest.raises(CancelledError):
+        _ = build_geometry_v2(
+            stack,
+            triangulator=_triangulator,
+            cancel_token=token,
+        )
 
 
 def test_render3d_pipeline_emits_expected_logging_events(monkeypatch: pytest.MonkeyPatch) -> None:

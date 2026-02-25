@@ -4,6 +4,7 @@ project(pwmb_geom_cpp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+option(WITH_OPENCV "Enable OpenCV contours implementation" OFF)
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
@@ -28,8 +29,18 @@ pybind11_add_module(
     MODULE
     src/module.cpp
     src/extract_polygons.cpp
+    src/triangulate.cpp
 )
 target_include_directories(_pwmb_geom PRIVATE include)
+if(WITH_OPENCV)
+    find_package(OpenCV QUIET COMPONENTS core imgproc)
+    if(NOT OpenCV_FOUND)
+        message(FATAL_ERROR "WITH_OPENCV=ON but OpenCV (core,imgproc) was not found")
+    endif()
+    target_include_directories(_pwmb_geom PRIVATE ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(_pwmb_geom PRIVATE ${OpenCV_LIBS})
+    target_compile_definitions(_pwmb_geom PRIVATE PWMB_GEOM_WITH_OPENCV=1)
+endif()
 
 set_target_properties(
     _pwmb_geom
