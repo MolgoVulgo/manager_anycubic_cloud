@@ -9,7 +9,7 @@ import pytest
 
 from accloud_core.logging_contract import JsonLineFormatter, operation_context
 from pwmb_core.types import HeaderInfo, LayerDef, MachineInfo, PwmbDocument
-from render3d_core.contours import build_contour_stack
+from render3d_core.contours import PixelLayerLoops, build_contour_stack
 from render3d_core.geometry_v2 import build_geometry_v2
 from render3d_core.perf import BuildMetrics
 from render3d_core.types import LayerLoops, PwmbContourStack
@@ -161,6 +161,63 @@ def test_build_contour_stack_xy_stride_preserves_world_size(monkeypatch: pytest.
     assert area_down == pytest.approx(area_full, rel=1e-6)
 
 
+def test_build_contour_stack_accepts_custom_pixel_extractor(monkeypatch: pytest.MonkeyPatch) -> None:
+    document = _make_document(width=4, height=4, layers=1)
+    decoded = np.asarray(
+        [
+            255, 255, 255, 255,
+            255, 255, 255, 255,
+            255, 255, 255, 255,
+            255, 255, 255, 255,
+        ],
+        dtype=np.uint8,
+    )
+    monkeypatch.setattr("render3d_core.contours.decode_layer", lambda *_args, **_kwargs: decoded)
+
+    calls = {"count": 0}
+
+    def _pixel_extractor(mask: np.ndarray) -> PixelLayerLoops:
+        calls["count"] += 1
+        assert mask.shape == (4, 4)
+        return PixelLayerLoops(
+            outer=[[(0, 0), (4, 0), (4, 4), (0, 4)]],
+            holes=[],
+        )
+
+    stack = build_contour_stack(
+        document,
+        threshold=1,
+        binarization_mode="index_strict",
+        pixel_extractor=_pixel_extractor,
+    )
+
+    assert calls["count"] == 1
+    assert 0 in stack.layers
+    assert len(stack.layers[0].outer) == 1
+    assert len(stack.layers[0].holes) == 0
+
+
+def test_build_contour_stack_decodes_sampled_layers_by_position(monkeypatch: pytest.MonkeyPatch) -> None:
+    document = _make_document(width=2, height=2, layers=3)
+    document.layers = [
+        LayerDef(index=0, data_address=0, data_length=8),
+        LayerDef(index=10, data_address=8, data_length=8),
+        LayerDef(index=20, data_address=16, data_length=8),
+    ]
+    decoded = np.asarray([255, 255, 255, 255], dtype=np.uint8)
+    seen_positions: list[int] = []
+
+    def _decode(_document, layer_index: int, **_kwargs):
+        seen_positions.append(int(layer_index))
+        return decoded
+
+    monkeypatch.setattr("render3d_core.contours.decode_layer", _decode)
+    stack = build_contour_stack(document, threshold=1, binarization_mode="index_strict")
+
+    assert seen_positions == [0, 1, 2]
+    assert sorted(stack.layers.keys()) == [0, 10, 20]
+
+
 def test_build_geometry_v2_generates_ranges_and_vertices() -> None:
     stack = PwmbContourStack(
         pitch_x_mm=0.1,
@@ -183,6 +240,26 @@ def test_build_geometry_v2_generates_ranges_and_vertices() -> None:
     assert len(geometry.point_vertices) == 4
     assert _triangles_area(geometry.triangle_vertices) == pytest.approx(4.0, rel=1e-6)
     assert all(vertex[2] == pytest.approx(0.0) for vertex in geometry.triangle_vertices)
+
+
+def test_build_geometry_v2_contours_only_skips_triangles() -> None:
+    stack = PwmbContourStack(
+        pitch_x_mm=0.1,
+        pitch_y_mm=0.1,
+        pitch_z_mm=0.05,
+        layers={
+            0: LayerLoops(
+                outer=[[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]],
+                holes=[],
+            )
+        },
+    )
+    geometry = build_geometry_v2(stack, include_fill=False)
+
+    assert len(geometry.triangle_vertices) == 0
+    assert geometry.tri_range[0].count == 0
+    assert len(geometry.line_vertices) > 0
+    assert len(geometry.point_vertices) > 0
 
 
 def test_build_geometry_v2_hole_reduces_filled_area() -> None:

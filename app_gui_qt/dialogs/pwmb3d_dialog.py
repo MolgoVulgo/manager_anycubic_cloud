@@ -4,6 +4,7 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass
 import logging
+import math
 import queue
 from pathlib import Path
 from time import perf_counter
@@ -18,11 +19,10 @@ from pwmb_core.decode_pws import select_pws_convention
 from render3d_core import (
     BuildCache,
     BuildMetrics,
+    GEOM_BACKEND_ENV,
     GpuMetrics,
-    build_contour_stack,
-    build_geometry_v2,
-    compute_file_signature,
-    make_cache_key,
+    build_geometry_pipeline,
+    get_geometry_backend,
 )
 from render3d_core.task_runner import TaskRunner
 from render3d_core.types import LayerRange, PwmbContourGeometry
@@ -52,6 +52,10 @@ _STAGE_LABELS = {
     "upload": "Uploading buffers to GPU...",
     "done": "Build completed.",
 }
+_PHASE_LABELS = {
+    "contours": "Pass 1/2 (contours)",
+    "fill": "Pass 2/2 (fill)",
+}
 
 
 @dataclass(slots=True)
@@ -60,7 +64,11 @@ class _BuildJobResult:
     built_layer_ids: list[int]
     document_layer_count: int
     source_path: str
+    phase: str
+    include_fill: bool
+    backend_name: str
     xy_stride: int
+    z_stride: int
     metrics: BuildMetrics
     contour_cache_hit: bool
     geometry_cache_hit: bool
@@ -69,14 +77,51 @@ class _BuildJobResult:
 def _select_preview_xy_stride(*, width: int, height: int) -> int:
     pixels = max(0, int(width)) * max(0, int(height))
     if pixels >= 24_000_000:
-        return 6
-    if pixels >= 12_000_000:
-        return 4
-    if pixels >= 6_000_000:
-        return 3
-    if pixels >= 2_500_000:
-        return 2
-    return 1
+        base_stride = 6
+    elif pixels >= 12_000_000:
+        base_stride = 4
+    elif pixels >= 6_000_000:
+        base_stride = 3
+    elif pixels >= 2_500_000:
+        base_stride = 2
+    else:
+        base_stride = 1
+    return base_stride
+
+
+def _select_preview_xy_stride_for_complexity(*, width: int, height: int, layer_count: int) -> int:
+    stride = _select_preview_xy_stride(width=width, height=height)
+    complexity = max(0, int(width)) * max(0, int(height)) * max(1, int(layer_count))
+    if complexity >= 11_000_000_000:
+        return min(6, stride + 2)
+    if complexity >= 9_000_000_000:
+        return min(6, stride + 1)
+    return stride
+
+
+def _select_preview_z_stride(
+    *,
+    layer_count: int,
+    width: int | None = None,
+    height: int | None = None,
+    target_layers: int = 600,
+) -> int:
+    layers = max(1, int(layer_count))
+    target = max(8, int(target_layers))
+    if width is not None and height is not None:
+        complexity = max(0, int(width)) * max(0, int(height)) * layers
+        if complexity >= 11_000_000_000:
+            target = min(target, 200)
+        elif complexity >= 9_000_000_000:
+            target = min(target, 300)
+    return max(1, int(math.ceil(float(layers) / float(target))))
+
+
+def _select_preview_max_vertices(*, width: int, height: int, layer_count: int) -> int:
+    complexity = max(0, int(width)) * max(0, int(height)) * max(1, int(layer_count))
+    if complexity >= 11_000_000_000:
+        return 1_200_000
+    return 1_200_000
 
 
 def _build_geometry_job(
@@ -84,16 +129,19 @@ def _build_geometry_job(
     source_path: str,
     threshold: int,
     bin_mode: str,
+    phase: str,
+    include_fill: bool,
     op_id: str,
-    progress_cb: Callable[[int, str], None] | None = None,
+    progress_cb: Callable[[str, int, str], None] | None = None,
 ) -> _BuildJobResult:
     metrics = BuildMetrics(pool_kind="threads", workers=1)
+    backend = get_geometry_backend()
 
     def _stage(percent: int, stage: str) -> None:
         pct = max(0, min(100, int(percent)))
         if progress_cb is not None:
-            progress_cb(pct, stage)
-        LOGGER_BUILD.info("PWMB build stage=%s percent=%d", stage, pct)
+            progress_cb(phase, pct, stage)
+        LOGGER_BUILD.info("PWMB build phase=%s stage=%s percent=%d", phase, stage, pct)
 
     with operation_context(op_id):
         _stage(5, "read")
@@ -101,7 +149,26 @@ def _build_geometry_job(
         document = read_pwmb_document(source_path)
         _ensure_pws_convention(document)
         metrics.parse_ms = (perf_counter() - parse_start) * 1000.0
-        xy_stride = _select_preview_xy_stride(width=document.width, height=document.height)
+        layer_count = len(document.layers)
+        xy_stride = _select_preview_xy_stride_for_complexity(
+            width=document.width,
+            height=document.height,
+            layer_count=layer_count,
+        )
+        z_stride = _select_preview_z_stride(
+            layer_count=layer_count,
+            width=document.width,
+            height=document.height,
+        )
+        max_vertices_profile = _select_preview_max_vertices(
+            width=document.width,
+            height=document.height,
+            layer_count=layer_count,
+        )
+        # Progressive mode must preserve full Z coverage. A hard global vertex budget
+        # truncates the tail layers on dense models (e.g. raven_skull), so we disable
+        # it for viewer builds and rely on XY/Z sampling for performance.
+        max_vertices: int | None = None
 
         emit_event(
             LOGGER_BUILD,
@@ -112,68 +179,53 @@ def _build_geometry_job(
             op_id=op_id,
             data={
                 "pwmb": {"W": document.width, "H": document.height},
-                "render3d": {"xy_stride": xy_stride},
+                "render3d": {
+                    "xy_stride": xy_stride,
+                    "z_stride": z_stride,
+                    "max_vertices_profile": max_vertices_profile,
+                    "max_vertices_applied": max_vertices,
+                    "geom_backend": backend.name,
+                    "phase": phase,
+                    "include_fill": bool(include_fill),
+                },
             },
         )
 
-        file_signature = compute_file_signature(source_path)
-        contour_key = make_cache_key(
+        stage_map = {
+            "cache_contours_lookup": (12, "cache"),
+            "cache_contours_hit": (25, "cache"),
+            "decode": (22, "decode"),
+            "contours": (46, "contours"),
+            "cache_geometry_lookup": (58, "cache"),
+            "cache_geometry_hit": (78, "cache"),
+            "geometry": (72, "geometry"),
+        }
+
+        def _pipeline_stage_cb(stage: str) -> None:
+            progress = stage_map.get(stage)
+            if progress is None:
+                return
+            _stage(progress[0], progress[1])
+
+        pipeline_result = build_geometry_pipeline(
             document,
             threshold=threshold,
             bin_mode=bin_mode,
             xy_stride=xy_stride,
-            z_stride=1,
-            simplify_epsilon=0.0,
+            z_stride=z_stride,
             max_layers=None,
-            max_vertices=None,
-            render_mode="contours",
-            file_signature=file_signature,
+            max_vertices=max_vertices,
+            max_xy_stride=1,
+            include_fill=include_fill,
+            backend=backend,
+            cache=_VIEWER_BUILD_CACHE,
+            metrics=metrics,
+            stage_cb=_pipeline_stage_cb,
         )
-        geometry_key = make_cache_key(
-            document,
-            threshold=threshold,
-            bin_mode=bin_mode,
-            xy_stride=xy_stride,
-            z_stride=1,
-            simplify_epsilon=0.0,
-            max_layers=None,
-            max_vertices=None,
-            render_mode="fill",
-            file_signature=file_signature,
-        )
-
-        _stage(12, "cache")
-        contour_stack = _VIEWER_BUILD_CACHE.get_contours(contour_key)
-        contour_cache_hit = contour_stack is not None
-        if contour_cache_hit:
-            _stage(25, "cache")
-        else:
-            _stage(22, "decode")
-            _stage(46, "contours")
-            contour_stack = build_contour_stack(
-                document,
-                threshold=threshold,
-                binarization_mode=bin_mode,
-                xy_stride=xy_stride,
-                metrics=metrics,
-            )
-            _VIEWER_BUILD_CACHE.set_contours(contour_key, contour_stack)
-
-        _stage(58, "cache")
-        geometry = _VIEWER_BUILD_CACHE.get_geometry(geometry_key)
-        geometry_cache_hit = geometry is not None
-        if geometry_cache_hit:
-            _stage(78, "cache")
-        else:
-            _stage(72, "geometry")
-            geometry = build_geometry_v2(
-                contour_stack,
-                max_layers=None,
-                max_vertices=None,
-                max_xy_stride=1,
-                metrics=metrics,
-            )
-            _VIEWER_BUILD_CACHE.set_geometry(geometry_key, geometry)
+        contour_stack = pipeline_result.contour_stack
+        geometry = pipeline_result.geometry
+        contour_cache_hit = pipeline_result.contour_cache_hit
+        geometry_cache_hit = pipeline_result.geometry_cache_hit
 
         _stage(90, "upload")
         _stage(100, "done")
@@ -188,7 +240,14 @@ def _build_geometry_job(
             data={
                 "render3d": {
                     **metrics.as_log_data(),
+                    "geom_backend": backend.name,
+                    "geom_backend_env": GEOM_BACKEND_ENV,
                     "xy_stride": xy_stride,
+                    "z_stride": z_stride,
+                    "max_vertices_profile": max_vertices_profile,
+                    "max_vertices_applied": max_vertices,
+                    "phase": phase,
+                    "include_fill": bool(include_fill),
                     "contour_cache_hit": contour_cache_hit,
                     "geometry_cache_hit": geometry_cache_hit,
                 }
@@ -206,7 +265,11 @@ def _build_geometry_job(
             built_layer_ids=sorted(contour_stack.layers.keys()),
             document_layer_count=len(document.layers),
             source_path=source_path,
+            phase=phase,
+            include_fill=bool(include_fill),
+            backend_name=pipeline_result.backend_name,
             xy_stride=xy_stride,
+            z_stride=z_stride,
             metrics=metrics,
             contour_cache_hit=contour_cache_hit,
             geometry_cache_hit=geometry_cache_hit,
@@ -429,17 +492,20 @@ def _make_viewport(parent=None):
             self._gpu_metrics.draw_ms_point = point_ms
             if self._log_next_draw:
                 LOGGER_GPU.info(
-                    "PWMB draw mode=%s visible_layers=%d",
+                    "PWMB draw mode=%s visible_layers=%d cutoff_layer=%d",
                     "contours" if self._contour_only else "fill",
                     len(draw_layers),
+                    int(self._layer_cutoff),
                 )
+                gpu_data = self._gpu_metrics.as_log_data()
+                gpu_data["layer_cutoff"] = int(self._layer_cutoff)
                 emit_event(
                     LOGGER_GPU,
                     logging.INFO,
                     event="gpu.draw",
                     msg="PWMB GPU draw metrics",
                     component="render3d.gpu",
-                    data={"render3d": self._gpu_metrics.as_log_data()},
+                    data={"render3d": gpu_data},
                 )
                 self._log_next_draw = False
 
@@ -652,10 +718,12 @@ def build_pwmb3d_dialog(
     dialog.setMinimumSize(860, 560)
 
     runner = TaskRunner(pool_kind="threads", workers=2)
-    progress_queue: queue.SimpleQueue[tuple[int, str]] = queue.SimpleQueue()
+    progress_queue: queue.SimpleQueue[tuple[str, int, str]] = queue.SimpleQueue()
     build_future: Future[_BuildJobResult] | None = None
     resolve_future: Future[Path | None] | None = None
     build_op_id: str | None = None
+    build_source: Path | None = None
+    contour_preview_ready = False
     poll_timer = qtcore.QTimer(dialog)
     poll_timer.setInterval(80)
 
@@ -665,7 +733,7 @@ def build_pwmb3d_dialog(
 
     title = qtwidgets.QLabel("PWMB 3D Viewer")
     title.setObjectName("title")
-    subtitle = qtwidgets.QLabel("OpenGL viewport + build CPU async (contours -> geometry -> upload).")
+    subtitle = qtwidgets.QLabel("OpenGL viewport + progressive CPU build (contours first, fill pass second).")
     subtitle.setObjectName("subtitle")
     root.addWidget(title)
     root.addWidget(subtitle)
@@ -702,7 +770,17 @@ def build_pwmb3d_dialog(
     cutoff_slider = qtwidgets.QSlider(qtcore.Qt.Orientation.Horizontal)
     cutoff_slider.setRange(0, 100)
     cutoff_slider.setValue(100)
-    form.addRow("Layer cutoff", cutoff_slider)
+    cutoff_value = qtwidgets.QLabel("L100 / 100")
+    cutoff_value.setMinimumWidth(96)
+    cutoff_value.setAlignment(qtcore.Qt.AlignmentFlag.AlignRight | qtcore.Qt.AlignmentFlag.AlignVCenter)
+    cutoff_row = qtwidgets.QHBoxLayout()
+    cutoff_row.setContentsMargins(0, 0, 0, 0)
+    cutoff_row.setSpacing(8)
+    cutoff_row.addWidget(cutoff_slider, 1)
+    cutoff_row.addWidget(cutoff_value, 0)
+    cutoff_box = qtwidgets.QWidget()
+    cutoff_box.setLayout(cutoff_row)
+    form.addRow("Layer cutoff", cutoff_box)
 
     stride_slider = qtwidgets.QSlider(qtcore.Qt.Orientation.Horizontal)
     stride_slider.setRange(1, 16)
@@ -761,28 +839,38 @@ def build_pwmb3d_dialog(
             return None
         return Path(text).expanduser()
 
-    def _apply_stage(percent: int, stage: str) -> None:
-        pct = max(0, min(100, int(percent)))
+    def _normalize_progress(*, phase: str, phase_percent: int) -> int:
+        pct = max(0, min(100, int(phase_percent)))
+        if phase == "contours":
+            return max(0, min(45, int(round(pct * 0.45))))
+        if phase == "fill":
+            return max(45, min(100, 45 + int(round(pct * 0.55))))
+        return pct
+
+    def _apply_stage(phase: str, percent: int, stage: str) -> None:
+        phase_pct = max(0, min(100, int(percent)))
+        pct = _normalize_progress(phase=phase, phase_percent=phase_pct)
         label = _STAGE_LABELS.get(stage, f"Stage: {stage}")
+        phase_label = _PHASE_LABELS.get(phase, phase)
         progress.setValue(pct)
-        info_label.setText(f"{label} ({pct}%)")
+        info_label.setText(f"{phase_label} - {label} ({pct}%)")
         emit_event(
             LOGGER_BUILD,
             logging.INFO,
-            event="build.progress",
-            msg=f"PWMB build stage={stage} percent={pct}",
+            event="build.progressive",
+            msg=f"PWMB build phase={phase} stage={stage} percent={pct}",
             component="render3d.build",
             op_id=build_op_id,
-            data={"render3d": {"stage": stage, "percent": pct}},
+            data={"render3d": {"phase": phase, "stage": stage, "phase_percent": phase_pct, "percent": pct}},
         )
 
     def _drain_stage_updates() -> None:
         while True:
             try:
-                percent, stage = progress_queue.get_nowait()
+                phase, percent, stage = progress_queue.get_nowait()
             except queue.Empty:
                 break
-            _apply_stage(percent, stage)
+            _apply_stage(phase, percent, stage)
 
     def _apply_viewport_controls() -> None:
         if viewport_type is None:
@@ -797,6 +885,11 @@ def build_pwmb3d_dialog(
         viewport_widget.set_contour_only(contour_only.isChecked())
         viewport_widget.set_layer_cutoff(cutoff_slider.value())
 
+    def _refresh_cutoff_label() -> None:
+        current = int(cutoff_slider.value())
+        maximum = int(cutoff_slider.maximum())
+        cutoff_value.setText(f"L{current} / {maximum}")
+
     def _ensure_polling() -> None:
         if not poll_timer.isActive():
             poll_timer.start()
@@ -805,8 +898,24 @@ def build_pwmb3d_dialog(
         if build_future is None and resolve_future is None and poll_timer.isActive():
             poll_timer.stop()
 
+    def _submit_build_phase(*, source: Path, phase: str, include_fill: bool) -> None:
+        nonlocal build_future
+        if build_op_id is None:
+            raise RuntimeError("missing build operation id")
+        build_future = runner.submit(
+            _build_geometry_job,
+            source_path=str(source),
+            threshold=int(threshold_spin.value()),
+            bin_mode=bin_mode.currentText().strip(),
+            phase=str(phase),
+            include_fill=bool(include_fill),
+            op_id=build_op_id,
+            progress_cb=lambda job_phase, percent, stage: progress_queue.put((job_phase, percent, stage)),
+        )
+        _ensure_polling()
+
     def _start_build() -> None:
-        nonlocal build_future, build_op_id
+        nonlocal build_op_id, build_source, contour_preview_ready
         source = _path_from_input()
         if source is None:
             info_label.setText("Select a .pwmb file first.")
@@ -821,6 +930,8 @@ def build_pwmb3d_dialog(
             info_label.setText("A build is already running.")
             return
 
+        build_source = source
+        contour_preview_ready = False
         with operation_context() as op_id:
             build_op_id = op_id
             emit_event(
@@ -841,17 +952,9 @@ def build_pwmb3d_dialog(
             info_label.setText("Cannot start build: missing operation id.")
             return
 
-        _set_busy(True, _STAGE_LABELS["read"])
+        _set_busy(True, f"{_PHASE_LABELS['contours']} - {_STAGE_LABELS['read']}")
         progress.setValue(0)
-        build_future = runner.submit(
-            _build_geometry_job,
-            source_path=str(source),
-            threshold=int(threshold_spin.value()),
-            bin_mode=bin_mode.currentText().strip(),
-            op_id=build_op_id,
-            progress_cb=lambda percent, stage: progress_queue.put((percent, stage)),
-        )
-        _ensure_polling()
+        _submit_build_phase(source=source, phase="contours", include_fill=False)
 
     def _start_resolve() -> None:
         nonlocal resolve_future
@@ -885,13 +988,12 @@ def build_pwmb3d_dialog(
         _start_build()
 
     def _handle_build_done() -> None:
-        nonlocal build_future, build_op_id
+        nonlocal build_future, build_op_id, contour_preview_ready, build_source
         if build_future is None or not build_future.done():
             return
         future = build_future
         build_future = None
         _drain_stage_updates()
-        _set_busy(False)
         try:
             result = future.result()
         except Exception as exc:
@@ -904,28 +1006,52 @@ def build_pwmb3d_dialog(
                 op_id=build_op_id,
                 error={"type": type(exc).__name__, "message": str(exc)},
             )
-            info_label.setText(f"Build failed: {exc}")
+            if contour_preview_ready:
+                info_label.setText(f"Contours ready but fill pass failed: {exc}")
+            else:
+                info_label.setText(f"Build failed: {exc}")
+            _set_busy(False)
             build_op_id = None
+            build_source = None
             _stop_polling_if_idle()
             return
 
-        _apply_stage(90, "upload")
         if viewport_type is not None:
             viewport_widget.set_geometry(result.geometry, layer_ids=result.built_layer_ids)
             cutoff_max = max(result.document_layer_count - 1, result.built_layer_ids[-1] if result.built_layer_ids else 0)
             cutoff_slider.setRange(0, max(0, cutoff_max))
             cutoff_slider.setValue(cutoff_max)
+            _refresh_cutoff_label()
             _apply_viewport_controls()
-        _apply_stage(100, "done")
+        _apply_stage(result.phase, 90, "upload")
+        _apply_stage(result.phase, 100, "done")
+
+        if not result.include_fill:
+            contour_preview_ready = True
+            info_label.setText(
+                "Contours ready "
+                f"({Path(result.source_path).name}, layers={len(result.built_layer_ids)}/{result.document_layer_count}, "
+                f"xy_stride={result.xy_stride}, z_stride={result.z_stride}) - triangulating fill pass..."
+            )
+            source = build_source or Path(result.source_path)
+            _submit_build_phase(source=source, phase="fill", include_fill=True)
+            return
+
+        contour_preview_ready = False
+        _set_busy(False)
         info_label.setText(
             "Loaded "
             f"{Path(result.source_path).name} | "
+            f"backend={result.backend_name} | "
+            f"phase=progressive(contours->fill) | "
             f"layers={len(result.built_layer_ids)}/{result.document_layer_count} | "
             f"xy_stride={result.xy_stride} | "
+            f"z_stride={result.z_stride} | "
             f"tris={len(result.geometry.triangle_vertices) // 3} | "
             f"cache(contours={result.contour_cache_hit}, geometry={result.geometry_cache_hit})"
         )
         build_op_id = None
+        build_source = None
         _stop_polling_if_idle()
 
     def _poll_async() -> None:
@@ -983,7 +1109,7 @@ def build_pwmb3d_dialog(
     reset_btn.clicked.connect(_reset_camera)
     export_btn.clicked.connect(_export_screenshot)
     poll_timer.timeout.connect(_poll_async)
-    cutoff_slider.valueChanged.connect(lambda _v: _apply_viewport_controls())
+    cutoff_slider.valueChanged.connect(lambda _v: (_refresh_cutoff_label(), _apply_viewport_controls()))
     stride_slider.valueChanged.connect(lambda _v: _apply_viewport_controls())
     quality.currentIndexChanged.connect(lambda _i: _apply_viewport_controls())
     contour_only.stateChanged.connect(lambda _v: _apply_viewport_controls())
@@ -1003,4 +1129,5 @@ def build_pwmb3d_dialog(
             info_label.setText(f"Open 3D viewer for {file_label}. Select a local .pwmb file to render.")
         else:
             info_label.setText("Select a local .pwmb file then click Rebuild preview.")
+    _refresh_cutoff_label()
     return dialog

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app_gui_qt.dialogs.pwmb3d_dialog import _select_preview_xy_stride
+from app_gui_qt.dialogs.pwmb3d_dialog import (
+    _select_preview_xy_stride,
+    _select_preview_xy_stride_for_complexity,
+    _select_preview_z_stride,
+)
 from pwmb_core.types import HeaderInfo, LayerDef, MachineInfo, PwmbDocument
 from render3d_core.cache import compute_file_signature, make_cache_key
 from render3d_core.perf import BuildMetrics, GpuMetrics
@@ -120,3 +124,20 @@ def test_select_preview_xy_stride_is_adaptive() -> None:
     assert _select_preview_xy_stride(width=2200, height=1600) == 2
     assert _select_preview_xy_stride(width=3200, height=2100) == 3
     assert _select_preview_xy_stride(width=5760, height=3600) == 4
+
+
+def test_select_preview_z_stride_limits_visible_layers() -> None:
+    assert _select_preview_z_stride(layer_count=100) == 1
+    assert _select_preview_z_stride(layer_count=600) == 1
+    assert _select_preview_z_stride(layer_count=601) == 2
+    assert _select_preview_z_stride(layer_count=1223) == 3
+
+
+def test_select_preview_xy_stride_scales_for_heavy_complexity() -> None:
+    assert _select_preview_xy_stride_for_complexity(width=5760, height=3600, layer_count=398) == 4
+    assert _select_preview_xy_stride_for_complexity(width=5760, height=3600, layer_count=585) == 6
+
+
+def test_select_preview_z_stride_scales_for_heavy_complexity() -> None:
+    assert _select_preview_z_stride(layer_count=398, width=5760, height=3600) == 1
+    assert _select_preview_z_stride(layer_count=585, width=5760, height=3600) == 3

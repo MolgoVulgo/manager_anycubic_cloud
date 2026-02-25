@@ -20,6 +20,7 @@ def build_geometry_v2(
     max_layers: int | None = None,
     max_vertices: int | None = None,
     max_xy_stride: int = 1,
+    include_fill: bool = True,
     metrics: BuildMetrics | None = None,
 ) -> PwmbContourGeometry:
     op_id = get_op_id()
@@ -30,7 +31,13 @@ def build_geometry_v2(
         msg="Geometry build stage started",
         component="render3d.build",
         op_id=op_id,
-        data={"render3d": {"stage": "triangulate", "layers_visible": len(stack.layers)}},
+        data={
+            "render3d": {
+                "stage": "triangulate",
+                "layers_visible": len(stack.layers),
+                "include_fill": bool(include_fill),
+            }
+        },
     )
     try:
         start_ms = perf_counter()
@@ -80,24 +87,25 @@ def build_geometry_v2(
 
             tri_start = len(geometry.triangle_vertices)
             tri_count = 0
-            hole_map = _assign_holes_to_outers(outer_loops, hole_loops)
-            for outer_index, outer in enumerate(outer_loops):
-                holes = hole_map.get(outer_index, [])
-                triangles = _triangulate_polygon_with_holes(outer, holes)
-                for a, b, c in triangles:
-                    if _would_exceed_budget(geometry, vertex_budget, additional=3):
-                        stop_all = True
+            if include_fill:
+                hole_map = _assign_holes_to_outers(outer_loops, hole_loops)
+                for outer_index, outer in enumerate(outer_loops):
+                    holes = hole_map.get(outer_index, [])
+                    triangles = _triangulate_polygon_with_holes(outer, holes)
+                    for a, b, c in triangles:
+                        if _would_exceed_budget(geometry, vertex_budget, additional=3):
+                            stop_all = True
+                            break
+                        tri_count += 3
+                        geometry.triangle_vertices.extend(
+                            [
+                                _to_point4(a, z, layer_id),
+                                _to_point4(b, z, layer_id),
+                                _to_point4(c, z, layer_id),
+                            ]
+                        )
+                    if stop_all:
                         break
-                    tri_count += 3
-                    geometry.triangle_vertices.extend(
-                        [
-                            _to_point4(a, z, layer_id),
-                            _to_point4(b, z, layer_id),
-                            _to_point4(c, z, layer_id),
-                        ]
-                    )
-                if stop_all:
-                    break
             geometry.tri_range[layer_id] = LayerRange(start=tri_start, count=tri_count)
 
             line_start = len(geometry.line_vertices)
@@ -153,6 +161,7 @@ def build_geometry_v2(
                 "render3d": {
                     "stage": "triangulate",
                     "layers_visible": len(layer_ids),
+                    "include_fill": bool(include_fill),
                     "tris": len(geometry.triangle_vertices) // 3,
                     "verts": len(geometry.triangle_vertices),
                 }

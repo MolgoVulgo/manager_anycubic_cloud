@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Iterable
+from dataclasses import dataclass
 import logging
 from time import perf_counter
+from typing import Callable
 
 import numpy as np
 
@@ -24,6 +25,12 @@ _MAX_DECODE_FAILURE_RATIO = 0.70
 _DECODE_FAILURE_SAMPLE_LIMIT = 8
 
 
+@dataclass(slots=True)
+class PixelLayerLoops:
+    outer: list[list[PointI]]
+    holes: list[list[PointI]]
+
+
 def build_contour_stack(
     document: PwmbDocument,
     threshold: int,
@@ -31,6 +38,7 @@ def build_contour_stack(
     *,
     xy_stride: int = 1,
     metrics: BuildMetrics | None = None,
+    pixel_extractor: Callable[[np.ndarray], PixelLayerLoops] | None = None,
 ) -> PwmbContourStack:
     op_id = get_op_id()
     emit_event(
@@ -69,13 +77,14 @@ def build_contour_stack(
         decode_failures = 0
         decode_failure_samples: list[dict[str, object]] = []
         fail_fast = False
-        for layer in document.layers:
+        active_pixel_extractor = pixel_extractor or _extract_layer_loops
+        for layer_position, layer in enumerate(document.layers):
             layers_processed += 1
             decode_start = perf_counter()
             try:
                 decoded = decode_layer(
                     document,
-                    layer.index,
+                    layer_position,
                     threshold=None,
                     strict=False,
                     as_array=True,
@@ -125,9 +134,8 @@ def build_contour_stack(
                     metrics.layers_skipped += 1
                 continue
 
-            loops_px = _extract_loops(mask)
-            classified = _classify_loops(loops_px)
-            if not classified.outer and not classified.holes:
+            pixel_loops = active_pixel_extractor(mask)
+            if not pixel_loops.outer and not pixel_loops.holes:
                 if metrics is not None:
                     metrics.contours_ms_total += (perf_counter() - contour_start) * 1000.0
                     metrics.layers_skipped += 1
@@ -141,7 +149,7 @@ def build_contour_stack(
                     pitch_x_mm=pitch_x_mm,
                     pitch_y_mm=pitch_y_mm,
                 )
-                for loop in classified.outer
+                for loop in pixel_loops.outer
             ]
             world_holes = [
                 _pixel_loop_to_world(
@@ -151,7 +159,7 @@ def build_contour_stack(
                     pitch_x_mm=pitch_x_mm,
                     pitch_y_mm=pitch_y_mm,
                 )
-                for loop in classified.holes
+                for loop in pixel_loops.holes
             ]
             layer_loops = LayerLoops(
                 outer=[loop for loop in world_outer if len(loop) >= 3],
@@ -250,6 +258,11 @@ def build_contour_stack(
         raise
 
 
+def _extract_layer_loops(mask: np.ndarray) -> PixelLayerLoops:
+    classified = _classify_loops(_extract_loops(mask))
+    return PixelLayerLoops(outer=classified.outer, holes=classified.holes)
+
+
 def _safe_pitch_xy(pixel_size_um: float) -> float:
     if pixel_size_um > 0:
         return float(pixel_size_um) / 1000.0
@@ -293,6 +306,12 @@ def _build_mask(
     return arr != 0
 
 
+def _undirected_edge_key(a: PointI, b: PointI) -> tuple[PointI, PointI]:
+    if a <= b:
+        return (a, b)
+    return (b, a)
+
+
 def _extract_loops(mask: np.ndarray) -> list[list[PointI]]:
     edges: dict[tuple[PointI, PointI], tuple[PointI, PointI]] = {}
     ys, xs = np.nonzero(mask)
@@ -311,9 +330,9 @@ def _extract_loops(mask: np.ndarray) -> list[list[PointI]]:
             else:
                 edges[key] = edge
 
-    outgoing: dict[PointI, list[PointI]] = defaultdict(list)
+    outgoing: dict[PointI, list[PointI]] = {}
     for start, end in edges.values():
-        outgoing[start].append(end)
+        outgoing.setdefault(start, []).append(end)
 
     used: set[tuple[PointI, PointI]] = set()
     loops: list[list[PointI]] = []
@@ -462,9 +481,3 @@ def _pixel_loop_to_world(
         y = (cy - float(y_raw)) * pitch_y_mm
         world.append((x, y))
     return world
-
-
-def _undirected_edge_key(a: PointI, b: PointI) -> tuple[PointI, PointI]:
-    if a <= b:
-        return (a, b)
-    return (b, a)

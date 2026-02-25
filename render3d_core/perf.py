@@ -10,6 +10,7 @@ class BuildMetrics:
     decode_mb_s: float = 0.0
     contours_ms_total: float = 0.0
     triangulation_ms_total: float = 0.0
+    buffers_ms_total: float = 0.0
     layers_total: int = 0
     layers_built: int = 0
     layers_skipped: int = 0
@@ -26,6 +27,7 @@ class BuildMetrics:
             "decode_mb_s": round(self.decode_mb_s, 3),
             "contours_ms_total": round(self.contours_ms_total, 3),
             "triangulation_ms_total": round(self.triangulation_ms_total, 3),
+            "buffers_ms_total": round(self.buffers_ms_total, 3),
             "layers_total": int(self.layers_total),
             "layers_built": int(self.layers_built),
             "layers_skipped": int(self.layers_skipped),

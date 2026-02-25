@@ -10,7 +10,12 @@ import hashlib
 import numpy as np
 
 from accloud_core.logging_contract import emit_event, get_op_id
-from pwmb_core.decode_pw0 import decode_pw0_layer
+from pwmb_core.decode_pw0 import (
+    PW0_VARIANT_BYTE_TOKEN,
+    PW0_VARIANT_WORD16,
+    decode_pw0_layer,
+    normalize_pw0_variant,
+)
 from pwmb_core.decode_pws import PwsConvention, decode_pws_layer, select_pws_convention
 from pwmb_core.lut import parse_layer_image_color_table
 from pwmb_core.structs import parse_header_table, parse_layerdef_table, parse_machine_table
@@ -274,15 +279,38 @@ def decode_layer(
             )
             decoder_name = f"pws:{selected_convention.value}"
         elif "pw0" in format_name:
-            decoded = decode_pw0_layer(
+            previous_variant = document.pw0_variant
+            decoded_arr, selected_variant = _decode_pw0_adaptive(
+                document=document,
+                layer=layer,
                 blob=blob,
-                width=document.width,
-                height=document.height,
-                lut=document.lut,
                 strict=strict,
-                as_array=as_array,
             )
-            decoder_name = "pw0"
+            decoded = decoded_arr if as_array else decoded_arr.tolist()
+            decoder_name = f"pw0:{selected_variant}"
+
+            if previous_variant != selected_variant:
+                emit_event(
+                    LOGGER_DECODE,
+                    logging.INFO,
+                    event="pwmb.decode_pw0_variant_selected",
+                    msg="PW0 variant selected/updated",
+                    component="pwmb.decode",
+                    op_id=op_id,
+                    data={
+                        "pwmb": {
+                            "layer_index": layer_index,
+                            "W": document.width,
+                            "H": document.height,
+                            "aa": max(1, document.header.anti_aliasing),
+                            "decoder": decoder_name,
+                            "pw0_variant_prev": previous_variant,
+                            "pw0_variant_new": selected_variant,
+                            "non_zero_expected": layer.non_zero_pixel_count,
+                            "non_zero_decoded": int(np.count_nonzero(decoded_arr)),
+                        }
+                    },
+                )
         else:
             raise ValueError(f"Unsupported PWMB layer format: {document.machine.layer_image_format}")
 
@@ -317,6 +345,143 @@ def decode_layer(
             error={"type": type(exc).__name__, "message": str(exc)},
         )
         raise
+
+
+def _decode_pw0_adaptive(
+    *,
+    document: PwmbDocument,
+    layer,
+    blob: bytes,
+    strict: bool,
+) -> tuple[np.ndarray, str]:
+    expected_non_zero = layer.non_zero_pixel_count
+    try:
+        preferred_variant = normalize_pw0_variant(document.pw0_variant)
+    except Exception:
+        preferred_variant = PW0_VARIANT_WORD16
+
+    selected_arr: np.ndarray | None = None
+    selected_variant = preferred_variant
+    primary_error = 2**31 - 1
+    selected_error = primary_error
+    primary_exc: Exception | None = None
+
+    alternate_variant = _other_pw0_variant(preferred_variant)
+    try:
+        primary_arr, primary_error = _decode_pw0_variant_with_error(
+            blob=blob,
+            width=document.width,
+            height=document.height,
+            lut=document.lut,
+            strict=strict,
+            variant=preferred_variant,
+            expected_non_zero=expected_non_zero,
+        )
+        selected_arr = primary_arr
+        selected_error = primary_error
+    except Exception as exc:
+        primary_exc = exc
+
+    should_probe_alternate = (
+        selected_arr is None
+        or document.pw0_variant is None
+        or _pw0_error_requires_probe(error=primary_error, expected_non_zero=expected_non_zero)
+    )
+    if should_probe_alternate:
+        try:
+            alt_arr, alt_error = _decode_pw0_variant_with_error(
+                blob=blob,
+                width=document.width,
+                height=document.height,
+                lut=document.lut,
+                strict=strict,
+                variant=alternate_variant,
+                expected_non_zero=expected_non_zero,
+            )
+        except Exception:
+            if selected_arr is None:
+                if primary_exc is not None:
+                    raise primary_exc
+                raise
+        else:
+            if selected_arr is None:
+                selected_arr = alt_arr
+                selected_variant = alternate_variant
+                selected_error = alt_error
+            elif _pw0_should_switch_variant(
+                primary_error=selected_error,
+                alternate_error=alt_error,
+                expected_non_zero=expected_non_zero,
+            ):
+                selected_arr = alt_arr
+                selected_variant = alternate_variant
+                selected_error = alt_error
+
+    if selected_arr is None:
+        if primary_exc is not None:
+            raise primary_exc
+        raise ValueError("PW0 decoding failed with no available variant")
+    document.pw0_variant = selected_variant
+    return selected_arr, selected_variant
+
+
+def _decode_pw0_variant_with_error(
+    *,
+    blob: bytes,
+    width: int,
+    height: int,
+    lut: list[int],
+    strict: bool,
+    variant: str,
+    expected_non_zero: int | None,
+) -> tuple[np.ndarray, int]:
+    decoded = decode_pw0_layer(
+        blob=blob,
+        width=width,
+        height=height,
+        lut=lut,
+        strict=strict,
+        as_array=True,
+        variant=variant,
+    )
+    non_zero = int(np.count_nonzero(decoded))
+    error = _pw0_non_zero_error(non_zero=non_zero, expected_non_zero=expected_non_zero)
+    return decoded, error
+
+
+def _pw0_non_zero_error(*, non_zero: int, expected_non_zero: int | None) -> int:
+    if expected_non_zero is None:
+        return 0
+    expected = max(0, int(expected_non_zero))
+    if expected == 0:
+        return max(0, int(non_zero))
+    return abs(int(non_zero) - expected)
+
+
+def _pw0_error_requires_probe(*, error: int, expected_non_zero: int | None) -> bool:
+    if expected_non_zero is None:
+        return False
+    expected = max(0, int(expected_non_zero))
+    tolerance = max(8_192, int(expected * 0.20))
+    return int(error) > tolerance
+
+
+def _pw0_should_switch_variant(
+    *,
+    primary_error: int,
+    alternate_error: int,
+    expected_non_zero: int | None,
+) -> bool:
+    if int(alternate_error) >= int(primary_error):
+        return False
+    baseline = 2_048
+    if expected_non_zero is not None:
+        baseline = max(baseline, int(max(1, int(expected_non_zero)) * 0.05))
+    return (int(primary_error) - int(alternate_error)) >= baseline
+
+
+def _other_pw0_variant(variant: str) -> str:
+    return PW0_VARIANT_BYTE_TOKEN if variant == PW0_VARIANT_WORD16 else PW0_VARIANT_WORD16
 
 
 def _parse_filemark(data: mmap.mmap) -> tuple[int, list[int]]:

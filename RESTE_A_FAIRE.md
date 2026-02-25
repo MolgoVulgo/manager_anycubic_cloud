@@ -11,6 +11,12 @@ Contexte: lots A (pipeline CPU contours/géométrie) et B (viewer OpenGL + wirin
 - [x] Ajouter la gestion explicite des stages de progression (`read`, `decode`, `contours`, `geometry`, `upload`, `done`, `cache`) dans le viewer.
 - [x] Rendre non-bloquant le chargement d'un fichier cloud pour le viewer (download async au lieu du callback synchrone).
 
+## Priorité 1.5 - Lot D
+
+- [x] Implémenter un rendu progressif 3D en 2 passes (contours d'abord, fill/triangulation ensuite).
+- [x] Conserver les interactions viewport pendant la pass fill (aperçu contours déjà affiché).
+- [x] Réutiliser le cache de contours entre les deux passes pour éviter un second decode/contours complet.
+
 ## Qualité Technique
 
 - [ ] Renforcer la triangulation des polygones avec trous pour les cas non axis-alignés complexes.

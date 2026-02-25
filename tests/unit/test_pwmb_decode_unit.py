@@ -56,6 +56,18 @@ def test_decode_pw0_can_return_numpy_array() -> None:
     assert decoded.tolist() == [51, 51]
 
 
+def test_decode_pw0_byte_token_variant_decodes_runs() -> None:
+    # token 0x00 + 0x01 -> 1 black pixel, then token 0x13 -> 3 grey(17) pixels
+    blob = bytes([0x00, 0x01, 0x13])
+    decoded = decode_pw0_layer(blob=blob, width=4, height=1, variant="byte_token")
+    assert decoded == [0, 17, 17, 17]
+
+
+def test_decode_pw0_rejects_unknown_variant() -> None:
+    with pytest.raises(Pw0DecodeError):
+        _ = decode_pw0_layer(blob=_pw0_word(1, 1), width=1, height=1, variant="bad_variant")
+
+
 def test_select_pws_convention_prefers_valid_candidate() -> None:
     convention = select_pws_convention(blob=bytes([0x83]), width=4, height=1, anti_aliasing=1)
     assert convention is PwsConvention.C1
