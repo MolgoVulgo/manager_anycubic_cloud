@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pwmb_core.types import PwmbDocument
 from render3d_core.backend import GeometryBackend, get_geometry_backend
 from render3d_core.cache import BuildCache, CacheKey, compute_file_signature, make_cache_key
+from render3d_core.contours import smooth_contour_stack_preview
 from render3d_core.perf import BuildMetrics
 from render3d_core.types import PwmbContourGeometry, PwmbContourStack
 
@@ -29,12 +30,14 @@ def build_geometry_pipeline(
     threshold: int,
     bin_mode: str,
     xy_stride: int,
+    contour_extractor: str = "pixel_edges",
     max_layers: int | None = None,
     max_vertices: int | None = None,
     max_xy_stride: int = 1,
     z_stride: int = 1,
     include_fill: bool = True,
     simplify_epsilon: float = 0.0,
+    contour_smoothing_iterations: int = 0,
     file_signature: str | None = None,
     backend: GeometryBackend | None = None,
     cache: BuildCache | None = None,
@@ -45,6 +48,10 @@ def build_geometry_pipeline(
     _raise_if_cancelled(cancel_token)
     selected_backend = backend or get_geometry_backend()
     effective_z_stride = max(1, int(z_stride))
+    extractor_name = str(contour_extractor).strip().lower() or "pixel_edges"
+    extractor_suffix = f"_ce_{extractor_name}" if extractor_name != "pixel_edges" else ""
+    smoothing_passes = max(0, int(contour_smoothing_iterations))
+    smoothing_suffix = f"_smooth_i{smoothing_passes}" if smoothing_passes > 0 else ""
     contour_document = _sample_document_layers(document, z_stride=effective_z_stride)
     signature = file_signature or compute_file_signature(document.path)
     contour_key = make_cache_key(
@@ -56,10 +63,14 @@ def build_geometry_pipeline(
         simplify_epsilon=simplify_epsilon,
         max_layers=max_layers,
         max_vertices=max_vertices,
-        render_mode="contours",
+        render_mode=f"contours{extractor_suffix}{smoothing_suffix}",
         file_signature=signature,
     )
     geometry_render_mode = "fill" if include_fill else "contours_only"
+    if extractor_suffix:
+        geometry_render_mode = f"{geometry_render_mode}{extractor_suffix}"
+    if smoothing_suffix:
+        geometry_render_mode = f"{geometry_render_mode}{smoothing_suffix}"
     geometry_key = make_cache_key(
         document,
         threshold=threshold,
@@ -93,9 +104,15 @@ def build_geometry_pipeline(
             threshold=threshold,
             binarization_mode=bin_mode,
             xy_stride=xy_stride,
+            contour_extractor=extractor_name,
             metrics=metrics,
             cancel_token=cancel_token,
         )
+        if smoothing_passes > 0:
+            contour_stack = smooth_contour_stack_preview(
+                contour_stack,
+                iterations=smoothing_passes,
+            )
         _raise_if_cancelled(cancel_token)
         if cache is not None:
             cache.set_contours(contour_key, contour_stack)

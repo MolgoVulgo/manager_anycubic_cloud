@@ -31,6 +31,7 @@ class GeometryBackend(Protocol):
         threshold: int,
         binarization_mode: str,
         xy_stride: int,
+        contour_extractor: str = "pixel_edges",
         metrics: BuildMetrics | None = None,
         cancel_token: object | None = None,
     ) -> PwmbContourStack:
@@ -65,6 +66,7 @@ class PythonGeometryBackend:
         threshold: int,
         binarization_mode: str,
         xy_stride: int,
+        contour_extractor: str = "pixel_edges",
         metrics: BuildMetrics | None = None,
         cancel_token: object | None = None,
     ) -> PwmbContourStack:
@@ -73,6 +75,7 @@ class PythonGeometryBackend:
             threshold=threshold,
             binarization_mode=binarization_mode,
             xy_stride=xy_stride,
+            contour_extractor=contour_extractor,
             metrics=metrics,
             cancel_token=cancel_token,
         )
@@ -115,6 +118,7 @@ class CppGeometryBackend:
         threshold: int,
         binarization_mode: str,
         xy_stride: int,
+        contour_extractor: str = "pixel_edges",
         metrics: BuildMetrics | None = None,
         cancel_token: object | None = None,
     ) -> PwmbContourStack:
@@ -125,6 +129,7 @@ class CppGeometryBackend:
             "threshold": threshold,
             "binarization_mode": binarization_mode,
             "xy_stride": xy_stride,
+            "contour_extractor": contour_extractor,
             "metrics": metrics,
         }
         if cancel_token is not None:
@@ -133,15 +138,23 @@ class CppGeometryBackend:
             return self.module.build_contours(**kwargs)  # type: ignore[no-any-return]
         except TypeError:
             # Backward compatibility with older pybind modules.
-            if cancel_token is None:
-                raise
-            return self.module.build_contours(  # type: ignore[no-any-return]
-                document=document,
-                threshold=threshold,
-                binarization_mode=binarization_mode,
-                xy_stride=xy_stride,
-                metrics=metrics,
-            )
+            try:
+                return self.module.build_contours(  # type: ignore[no-any-return]
+                    document=document,
+                    threshold=threshold,
+                    binarization_mode=binarization_mode,
+                    xy_stride=xy_stride,
+                    contour_extractor=contour_extractor,
+                    metrics=metrics,
+                )
+            except TypeError:
+                return self.module.build_contours(  # type: ignore[no-any-return]
+                    document=document,
+                    threshold=threshold,
+                    binarization_mode=binarization_mode,
+                    xy_stride=xy_stride,
+                    metrics=metrics,
+                )
 
     def build_geometry(
         self,

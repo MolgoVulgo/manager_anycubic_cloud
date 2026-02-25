@@ -52,6 +52,7 @@ When `GEOM_BACKEND=cpp` is active:
 - `GEOM_CPP_CONTOURS_IMPL=native` (default): native C++ extractor.
 - `GEOM_CPP_CONTOURS_IMPL=opencv`: OpenCV extractor (requires build with `WITH_OPENCV=ON`).
 - `GEOM_CPP_CONTOURS_IMPL=auto`: uses OpenCV when available, otherwise native.
+- `GEOM_CPP_OPENCV_APPROX=simple|tc89_l1|tc89_kcos` (default: `simple`) when OpenCV extractor is active.
 - `GEOM_CPP_TRIANGULATION_IMPL=native` (default): native C++ triangulation.
 - `GEOM_CPP_TRIANGULATION_IMPL=python`: fallback to Python triangulation path.
 - `GEOM_CPP_TRIANGULATION_IMPL=auto`: native when available, otherwise python.

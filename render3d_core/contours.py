@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from contextlib import nullcontext
 from dataclasses import dataclass
 import logging
+import math
 from time import perf_counter
 from typing import Callable
 
@@ -39,6 +40,7 @@ def build_contour_stack(
     binarization_mode: str = "index_strict",
     *,
     xy_stride: int = 1,
+    contour_extractor: str = "pixel_edges",
     metrics: BuildMetrics | None = None,
     pixel_extractor: Callable[[np.ndarray], PixelLayerLoops] | None = None,
     cancel_token: object | None = None,
@@ -59,6 +61,8 @@ def build_contour_stack(
             raise ValueError("PWMB document has invalid resolution")
         if binarization_mode not in {"index_strict", "threshold"}:
             raise ValueError(f"Unsupported binarization mode: {binarization_mode}")
+        if contour_extractor not in {"pixel_edges", "subpixel_halfgrid", "marching_squares"}:
+            raise ValueError(f"Unsupported contour extractor: {contour_extractor}")
         xy_step = max(1, int(xy_stride))
 
         pitch_x_mm = _safe_pitch_xy(document.header.pixel_size_um) * float(xy_step)
@@ -179,6 +183,13 @@ def build_contour_stack(
                         metrics.contours_ms_total += (perf_counter() - contour_start) * 1000.0
                         metrics.layers_skipped += 1
                     continue
+                if contour_extractor in {"subpixel_halfgrid", "marching_squares"}:
+                    pixel_loops = _subpixelize_pixel_layer_loops(pixel_loops)
+                    if not pixel_loops.outer and not pixel_loops.holes:
+                        if metrics is not None:
+                            metrics.contours_ms_total += (perf_counter() - contour_start) * 1000.0
+                            metrics.layers_skipped += 1
+                        continue
 
                 world_outer = [
                     _pixel_loop_to_world(
@@ -243,6 +254,7 @@ def build_contour_stack(
                         "layers_decode_failed": decode_failures,
                         "fail_fast": fail_fast,
                         "xy_stride": xy_step,
+                        "contour_extractor": contour_extractor,
                         "failure_samples": decode_failure_samples,
                     },
                 },
@@ -263,6 +275,7 @@ def build_contour_stack(
                     "outer_loops": total_outer,
                     "hole_loops": total_holes,
                     "xy_stride": xy_step,
+                    "contour_extractor": contour_extractor,
                     "decode_io_mode": decode_io_mode,
                     "fail_fast": fail_fast,
                 },
@@ -280,6 +293,7 @@ def build_contour_stack(
                     "stage": "loops",
                     "layers_visible": len(stack.layers),
                     "xy_stride": xy_step,
+                    "contour_extractor": contour_extractor,
                     "decode_io_mode": decode_io_mode,
                     "fail_fast": fail_fast,
                 }
@@ -315,6 +329,72 @@ def build_contour_stack(
 def _extract_layer_loops(mask: np.ndarray) -> PixelLayerLoops:
     classified = _classify_loops(_extract_loops(mask))
     return PixelLayerLoops(outer=classified.outer, holes=classified.holes)
+
+
+def smooth_contour_stack_preview(
+    stack: PwmbContourStack,
+    *,
+    iterations: int = 1,
+    strength: float = 0.30,
+    area_tolerance_ratio: float = 0.08,
+    bbox_tolerance_ratio: float = 0.08,
+) -> PwmbContourStack:
+    passes = max(0, int(iterations))
+    if passes <= 0 or not stack.layers:
+        return stack
+    smoothing_strength = max(0.05, min(0.45, float(strength)))
+    area_tol = max(0.01, float(area_tolerance_ratio))
+    bbox_tol = max(0.01, float(bbox_tolerance_ratio))
+    min_feature = max(float(stack.pitch_x_mm), float(stack.pitch_y_mm)) * 2.0
+    changed = False
+    out_layers: dict[int, LayerLoops] = {}
+    for layer_id, loops in stack.layers.items():
+        smoothed_outer: list[list[PointF]] = []
+        smoothed_holes: list[list[PointF]] = []
+        for loop in loops.outer:
+            smoothed = _smooth_world_loop_with_guards(
+                loop,
+                iterations=passes,
+                strength=smoothing_strength,
+                min_feature=min_feature,
+                area_tolerance_ratio=area_tol,
+                bbox_tolerance_ratio=bbox_tol,
+            )
+            smoothed_outer.append(smoothed)
+            changed = changed or (smoothed is not loop)
+        for loop in loops.holes:
+            smoothed = _smooth_world_loop_with_guards(
+                loop,
+                iterations=passes,
+                strength=smoothing_strength,
+                min_feature=min_feature,
+                area_tolerance_ratio=area_tol,
+                bbox_tolerance_ratio=bbox_tol,
+            )
+            smoothed_holes.append(smoothed)
+            changed = changed or (smoothed is not loop)
+        out_layers[layer_id] = LayerLoops(outer=smoothed_outer, holes=smoothed_holes)
+    if not changed:
+        return stack
+    return PwmbContourStack(
+        pitch_x_mm=stack.pitch_x_mm,
+        pitch_y_mm=stack.pitch_y_mm,
+        pitch_z_mm=stack.pitch_z_mm,
+        layers=out_layers,
+    )
+
+
+def _subpixelize_pixel_layer_loops(layer_loops: PixelLayerLoops) -> PixelLayerLoops:
+    sub_outer = [_subpixelize_loop_halfgrid(loop) for loop in layer_loops.outer]
+    sub_holes = [_subpixelize_loop_halfgrid(loop) for loop in layer_loops.holes]
+    outer = [loop for loop in sub_outer if len(loop) >= 3 and abs(_signed_area(loop)) > 1e-9]
+    holes = [loop for loop in sub_holes if len(loop) >= 3 and abs(_signed_area(loop)) > 1e-9]
+    if not outer and not holes:
+        return layer_loops
+    return PixelLayerLoops(
+        outer=[[(float(x), float(y)) for x, y in loop] for loop in outer],
+        holes=[[(float(x), float(y)) for x, y in loop] for loop in holes],
+    )
 
 
 def _raise_if_cancelled(cancel_token: object | None) -> None:
@@ -359,13 +439,29 @@ def _build_mask(
     arr = values if isinstance(values, np.ndarray) else np.asarray(values, dtype=np.uint8)
     arr = arr.reshape((height, width))
     step = max(1, int(xy_stride))
-    if step > 1:
-        arr = arr[::step, ::step]
     if mode == "threshold":
         limit = max(0, min(255, int(threshold)))
-        return arr >= limit
-    # "index_strict": best effort from decoded intensity semantics.
-    return arr != 0
+        mask = arr >= limit
+    else:
+        # "index_strict": strict material presence semantics (color index != 0).
+        mask = arr != 0
+    if step <= 1:
+        return mask
+    return _downsample_mask_any(mask, step)
+
+
+def _downsample_mask_any(mask: np.ndarray, step: int) -> np.ndarray:
+    if step <= 1:
+        return mask
+    height, width = mask.shape
+    out_h = max(1, (int(height) + step - 1) // step)
+    out_w = max(1, (int(width) + step - 1) // step)
+    pad_h = max(0, (out_h * step) - int(height))
+    pad_w = max(0, (out_w * step) - int(width))
+    if pad_h > 0 or pad_w > 0:
+        mask = np.pad(mask, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=False)
+    blocks = mask.reshape(out_h, step, out_w, step)
+    return np.any(blocks, axis=(1, 3))
 
 
 def _undirected_edge_key(a: PointI, b: PointI) -> tuple[PointI, PointI]:
@@ -517,7 +613,7 @@ def _classify_loops(loops: Iterable[list[PointI]]) -> LayerLoops:
     return LayerLoops(outer=outers, holes=holes)
 
 
-def _signed_area(loop: list[PointI]) -> float:
+def _signed_area(loop: list[tuple[float, float]]) -> float:
     area = 0.0
     size = len(loop)
     for idx in range(size):
@@ -527,8 +623,179 @@ def _signed_area(loop: list[PointI]) -> float:
     return 0.5 * area
 
 
+def _subpixelize_loop_halfgrid(loop: list[PointI]) -> list[PointF]:
+    if len(loop) < 4:
+        return [(float(x), float(y)) for x, y in loop]
+    points = np.asarray(loop, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 2:
+        return [(float(x), float(y)) for x, y in loop]
+    reference_area = abs(_signed_area_np(points))
+    if reference_area <= 1e-10:
+        return [(float(x), float(y)) for x, y in loop]
+    reference_sign = 1.0 if _signed_area_np(points) >= 0.0 else -1.0
+    reference_bbox_w, reference_bbox_h = _bbox_size_np(points)
+    if max(reference_bbox_w, reference_bbox_h) < 1.0:
+        return [(float(x), float(y)) for x, y in loop]
+
+    out_points: list[np.ndarray] = []
+    size = int(points.shape[0])
+    for idx in range(size):
+        prev = points[(idx - 1) % size]
+        current = points[idx]
+        nxt = points[(idx + 1) % size]
+        in_vec = current - prev
+        out_vec = nxt - current
+        in_len = float(np.linalg.norm(in_vec))
+        out_len = float(np.linalg.norm(out_vec))
+        if in_len <= 1e-9 or out_len <= 1e-9:
+            out_points.append(np.asarray(current, dtype=np.float64))
+            continue
+        in_dir = in_vec / in_len
+        out_dir = out_vec / out_len
+        step = min(0.5, 0.49 * in_len, 0.49 * out_len)
+        if step <= 1e-6:
+            out_points.append(np.asarray(current, dtype=np.float64))
+            continue
+        out_points.append(current - (in_dir * step))
+        out_points.append(current + (out_dir * step))
+
+    candidate = np.asarray(out_points, dtype=np.float64)
+    candidate = _rescale_world_loop_to_area(
+        candidate,
+        target_area_abs=reference_area,
+        sign=reference_sign,
+    )
+    if candidate is None:
+        return [(float(x), float(y)) for x, y in loop]
+    if not _validate_smoothed_world_loop(
+        reference_bbox_w=reference_bbox_w,
+        reference_bbox_h=reference_bbox_h,
+        reference_area_abs=reference_area,
+        reference_sign=reference_sign,
+        candidate=candidate,
+        area_tolerance_ratio=0.10,
+        bbox_tolerance_ratio=0.10,
+    ):
+        return [(float(x), float(y)) for x, y in loop]
+    return [(float(point[0]), float(point[1])) for point in candidate]
+
+
+def _smooth_world_loop_with_guards(
+    loop: list[PointF],
+    *,
+    iterations: int,
+    strength: float,
+    min_feature: float,
+    area_tolerance_ratio: float,
+    bbox_tolerance_ratio: float,
+) -> list[PointF]:
+    if len(loop) < 4:
+        return loop
+    points = np.asarray(loop, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 2:
+        return loop
+    if points.shape[0] > 12_000:
+        return loop
+    ref_area = _signed_area_np(points)
+    ref_area_abs = abs(ref_area)
+    if ref_area_abs <= 1e-10:
+        return loop
+    ref_bbox_w, ref_bbox_h = _bbox_size_np(points)
+    if max(ref_bbox_w, ref_bbox_h) < min_feature:
+        return loop
+    ref_sign = 1.0 if ref_area >= 0.0 else -1.0
+    current = points
+    for _ in range(max(1, int(iterations))):
+        candidate = _smooth_world_loop_once_np(current, strength=strength)
+        if candidate is None:
+            break
+        candidate = _rescale_world_loop_to_area(
+            candidate,
+            target_area_abs=ref_area_abs,
+            sign=ref_sign,
+        )
+        if candidate is None:
+            break
+        if not _validate_smoothed_world_loop(
+            reference_bbox_w=ref_bbox_w,
+            reference_bbox_h=ref_bbox_h,
+            reference_area_abs=ref_area_abs,
+            reference_sign=ref_sign,
+            candidate=candidate,
+            area_tolerance_ratio=area_tolerance_ratio,
+            bbox_tolerance_ratio=bbox_tolerance_ratio,
+        ):
+            break
+        current = candidate
+    if np.array_equal(current, points):
+        return loop
+    return [(float(point[0]), float(point[1])) for point in current]
+
+
+def _smooth_world_loop_once_np(points: np.ndarray, *, strength: float) -> np.ndarray | None:
+    if points.shape[0] < 4:
+        return None
+    prev_points = np.roll(points, 1, axis=0)
+    next_points = np.roll(points, -1, axis=0)
+    return ((1.0 - strength) * points) + (strength * 0.5 * (prev_points + next_points))
+
+
+def _rescale_world_loop_to_area(points: np.ndarray, *, target_area_abs: float, sign: float) -> np.ndarray | None:
+    area = _signed_area_np(points)
+    area_abs = abs(area)
+    if area_abs <= 1e-12:
+        return None
+    scale = math.sqrt(max(1e-12, target_area_abs) / area_abs)
+    if not np.isfinite(scale):
+        return None
+    scale = max(0.60, min(1.80, float(scale)))
+    center = np.mean(points, axis=0)
+    scaled = center + ((points - center) * scale)
+    if (_signed_area_np(scaled) * sign) <= 0.0:
+        return None
+    return scaled
+
+
+def _validate_smoothed_world_loop(
+    *,
+    reference_bbox_w: float,
+    reference_bbox_h: float,
+    reference_area_abs: float,
+    reference_sign: float,
+    candidate: np.ndarray,
+    area_tolerance_ratio: float,
+    bbox_tolerance_ratio: float,
+) -> bool:
+    area = _signed_area_np(candidate)
+    if (area * reference_sign) <= 0.0:
+        return False
+    area_ratio = abs(abs(area) - reference_area_abs) / max(reference_area_abs, 1e-12)
+    if area_ratio > area_tolerance_ratio:
+        return False
+    cand_w, cand_h = _bbox_size_np(candidate)
+    if reference_bbox_w > 1e-9:
+        if abs(cand_w - reference_bbox_w) / reference_bbox_w > bbox_tolerance_ratio:
+            return False
+    if reference_bbox_h > 1e-9:
+        if abs(cand_h - reference_bbox_h) / reference_bbox_h > bbox_tolerance_ratio:
+            return False
+    return True
+
+
+def _bbox_size_np(points: np.ndarray) -> tuple[float, float]:
+    mins = np.min(points, axis=0)
+    maxs = np.max(points, axis=0)
+    return (float(maxs[0] - mins[0]), float(maxs[1] - mins[1]))
+
+
+def _signed_area_np(points: np.ndarray) -> float:
+    x = points[:, 0]
+    y = points[:, 1]
+    return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+
 def _pixel_loop_to_world(
-    loop: list[PointI],
+    loop: list[tuple[float, float]],
     *,
     width: int,
     height: int,

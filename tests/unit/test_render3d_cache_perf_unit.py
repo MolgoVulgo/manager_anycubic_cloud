@@ -10,11 +10,16 @@ from app_gui_qt.dialogs.pwmb3d_dialog import (
     _camera_pose_for_orbit,
     _pan_center_for_drag,
     _quality_ratio_from_index,
+    _select_preview_xy_stride_for_quality,
     _sample_layers_by_ratio,
     _select_preview_xy_stride,
     _select_preview_xy_stride_for_complexity,
     _select_preview_z_stride,
     _sort_layers_back_to_front,
+    _resolve_viewer_fill_alpha_scale,
+    _resolve_viewer_line_width_px,
+    _resolve_viewer_msaa_samples,
+    _resolve_viewer_point_size_px,
 )
 from pwmb_core.types import HeaderInfo, LayerDef, MachineInfo, PwmbDocument
 from render3d_core.cache import compute_file_signature, make_cache_key
@@ -118,6 +123,10 @@ def test_perf_metrics_export_log_dicts() -> None:
         vbo_bytes_line=2000,
         vbo_bytes_point=3000,
         visible_layers_count=12,
+        msaa_samples=4,
+        line_width_px=1.35,
+        point_size_px=2.25,
+        fill_alpha_scale=0.92,
     )
 
     build_data = build.as_log_data()
@@ -126,6 +135,7 @@ def test_perf_metrics_export_log_dicts() -> None:
     assert build_data["pool_kind"] == "threads"
     assert gpu_data["vbo_bytes_tri"] == 1000
     assert gpu_data["visible_layers_count"] == 12
+    assert gpu_data["msaa_samples"] == 4
 
 
 def test_select_preview_xy_stride_is_adaptive() -> None:
@@ -145,6 +155,30 @@ def test_select_preview_z_stride_limits_visible_layers() -> None:
 def test_select_preview_xy_stride_scales_for_heavy_complexity() -> None:
     assert _select_preview_xy_stride_for_complexity(width=5760, height=3600, layer_count=398) == 4
     assert _select_preview_xy_stride_for_complexity(width=5760, height=3600, layer_count=585) == 6
+
+
+def test_select_preview_xy_stride_for_quality_forces_xy1_at_100_percent() -> None:
+    assert (
+        _select_preview_xy_stride_for_quality(
+            width=5760,
+            height=3600,
+            layer_count=585,
+            quality_ratio=1.0,
+        )
+        == 1
+    )
+
+
+def test_select_preview_xy_stride_for_quality_keeps_adaptive_stride_below_100_percent() -> None:
+    assert (
+        _select_preview_xy_stride_for_quality(
+            width=5760,
+            height=3600,
+            layer_count=585,
+            quality_ratio=0.66,
+        )
+        == 6
+    )
 
 
 def test_select_preview_z_stride_scales_for_heavy_complexity() -> None:
@@ -247,3 +281,33 @@ def test_sample_layers_by_ratio_keeps_expected_density() -> None:
     assert len(full) == 12
     assert len(medium) == 8
     assert len(low) == 4
+
+
+def test_viewer_gpu_style_env_resolution_and_clamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RENDER3D_MSAA_SAMPLES", raising=False)
+    monkeypatch.delenv("RENDER3D_LINE_WIDTH_PX", raising=False)
+    monkeypatch.delenv("RENDER3D_POINT_SIZE_PX", raising=False)
+    monkeypatch.delenv("RENDER3D_FILL_ALPHA_SCALE", raising=False)
+
+    assert _resolve_viewer_msaa_samples() == 4
+    assert _resolve_viewer_line_width_px() == pytest.approx(1.35, rel=1e-6)
+    assert _resolve_viewer_point_size_px() == pytest.approx(2.25, rel=1e-6)
+    assert _resolve_viewer_fill_alpha_scale() == pytest.approx(0.92, rel=1e-6)
+
+    monkeypatch.setenv("RENDER3D_MSAA_SAMPLES", "12")
+    monkeypatch.setenv("RENDER3D_LINE_WIDTH_PX", "10")
+    monkeypatch.setenv("RENDER3D_POINT_SIZE_PX", "-3")
+    monkeypatch.setenv("RENDER3D_FILL_ALPHA_SCALE", "0")
+    assert _resolve_viewer_msaa_samples() == 8
+    assert _resolve_viewer_line_width_px() == pytest.approx(4.0, rel=1e-6)
+    assert _resolve_viewer_point_size_px() == pytest.approx(1.0, rel=1e-6)
+    assert _resolve_viewer_fill_alpha_scale() == pytest.approx(0.25, rel=1e-6)
+
+    monkeypatch.setenv("RENDER3D_MSAA_SAMPLES", "bad")
+    monkeypatch.setenv("RENDER3D_LINE_WIDTH_PX", "bad")
+    monkeypatch.setenv("RENDER3D_POINT_SIZE_PX", "bad")
+    monkeypatch.setenv("RENDER3D_FILL_ALPHA_SCALE", "bad")
+    assert _resolve_viewer_msaa_samples() == 4
+    assert _resolve_viewer_line_width_px() == pytest.approx(1.35, rel=1e-6)
+    assert _resolve_viewer_point_size_px() == pytest.approx(2.25, rel=1e-6)
+    assert _resolve_viewer_fill_alpha_scale() == pytest.approx(0.92, rel=1e-6)

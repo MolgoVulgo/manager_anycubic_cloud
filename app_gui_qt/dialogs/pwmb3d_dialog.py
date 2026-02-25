@@ -40,6 +40,7 @@ GL_DEPTH_TEST = 0x0B71
 GL_BLEND = 0x0BE2
 GL_SRC_ALPHA = 0x0302
 GL_ONE_MINUS_SRC_ALPHA = 0x0303
+GL_MULTISAMPLE = 0x809D
 LOGGER_GUI = logging.getLogger("app.gui")
 LOGGER_BUILD = logging.getLogger("render3d.build")
 LOGGER_GPU = logging.getLogger("render3d.gpu")
@@ -60,8 +61,17 @@ _PHASE_LABELS = {
 }
 _POOL_KIND_ENV = "RENDER3D_POOL_KIND"
 _POOL_WORKERS_ENV = "RENDER3D_POOL_WORKERS"
+_VIEWER_CONTOUR_EXTRACTOR_ENV = "RENDER3D_CONTOUR_EXTRACTOR"
+_VIEWER_MSAA_SAMPLES_ENV = "RENDER3D_MSAA_SAMPLES"
+_VIEWER_LINE_WIDTH_ENV = "RENDER3D_LINE_WIDTH_PX"
+_VIEWER_POINT_SIZE_ENV = "RENDER3D_POINT_SIZE_PX"
+_VIEWER_FILL_ALPHA_SCALE_ENV = "RENDER3D_FILL_ALPHA_SCALE"
 _VALID_POOL_KINDS = {"auto", "threads", "processes"}
 _DEFAULT_POOL_WORKERS = 2
+_DEFAULT_MSAA_SAMPLES = 4
+_DEFAULT_LINE_WIDTH_PX = 1.35
+_DEFAULT_POINT_SIZE_PX = 2.25
+_DEFAULT_FILL_ALPHA_SCALE = 0.92
 _VIEWER_SETTINGS_ORG = "accloud"
 _VIEWER_SETTINGS_APP = "pwmb3d_viewer"
 _VIEWER_SETTINGS_PREFIX = "viewer"
@@ -204,6 +214,61 @@ def _resolve_runner_strategy(*, backend_name: str) -> _RunnerStrategy:
     )
 
 
+def _resolve_viewer_contour_extractor() -> str:
+    raw = str(os.getenv(_VIEWER_CONTOUR_EXTRACTOR_ENV, "subpixel_halfgrid")).strip().lower()
+    if raw in {"pixel_edges", "subpixel_halfgrid", "marching_squares"}:
+        return raw
+    return "subpixel_halfgrid"
+
+
+def _coerce_float_range(*, value: str | None, default: float, minimum: float, maximum: float) -> float:
+    if value is None or str(value).strip() == "":
+        return float(default)
+    try:
+        parsed = float(str(value).strip())
+    except Exception:
+        return float(default)
+    return max(float(minimum), min(float(maximum), parsed))
+
+
+def _resolve_viewer_msaa_samples() -> int:
+    raw = os.getenv(_VIEWER_MSAA_SAMPLES_ENV)
+    if raw is None or str(raw).strip() == "":
+        return int(_DEFAULT_MSAA_SAMPLES)
+    try:
+        parsed = int(str(raw).strip())
+    except Exception:
+        return int(_DEFAULT_MSAA_SAMPLES)
+    return max(0, min(8, parsed))
+
+
+def _resolve_viewer_line_width_px() -> float:
+    return _coerce_float_range(
+        value=os.getenv(_VIEWER_LINE_WIDTH_ENV),
+        default=_DEFAULT_LINE_WIDTH_PX,
+        minimum=1.0,
+        maximum=4.0,
+    )
+
+
+def _resolve_viewer_point_size_px() -> float:
+    return _coerce_float_range(
+        value=os.getenv(_VIEWER_POINT_SIZE_ENV),
+        default=_DEFAULT_POINT_SIZE_PX,
+        minimum=1.0,
+        maximum=8.0,
+    )
+
+
+def _resolve_viewer_fill_alpha_scale() -> float:
+    return _coerce_float_range(
+        value=os.getenv(_VIEWER_FILL_ALPHA_SCALE_ENV),
+        default=_DEFAULT_FILL_ALPHA_SCALE,
+        minimum=0.25,
+        maximum=1.0,
+    )
+
+
 def _raise_if_cancelled(cancel_token: object | None) -> None:
     if cancel_token is None:
         return
@@ -235,6 +300,23 @@ def _select_preview_xy_stride_for_complexity(*, width: int, height: int, layer_c
     if complexity >= 9_000_000_000:
         return min(6, stride + 1)
     return stride
+
+
+def _select_preview_xy_stride_for_quality(
+    *,
+    width: int,
+    height: int,
+    layer_count: int,
+    quality_ratio: float,
+) -> int:
+    quality = max(0.05, min(1.0, float(quality_ratio)))
+    if quality >= 0.999:
+        return 1
+    return _select_preview_xy_stride_for_complexity(
+        width=width,
+        height=height,
+        layer_count=layer_count,
+    )
 
 
 def _select_preview_z_stride(
@@ -296,12 +378,13 @@ def _build_geometry_job(
             _raise_if_cancelled(cancel_token)
             metrics.parse_ms = (perf_counter() - parse_start) * 1000.0
             layer_count = len(document.layers)
-            xy_stride = _select_preview_xy_stride_for_complexity(
+            selected_quality_ratio = max(0.05, min(1.0, float(quality_ratio)))
+            xy_stride = _select_preview_xy_stride_for_quality(
                 width=document.width,
                 height=document.height,
                 layer_count=layer_count,
+                quality_ratio=selected_quality_ratio,
             )
-            selected_quality_ratio = max(0.05, min(1.0, float(quality_ratio)))
             sampled_positions = _sample_layers_by_ratio(list(range(layer_count)), selected_quality_ratio)
             sampled_layer_count = len(sampled_positions)
             sampled_document = document
@@ -317,6 +400,8 @@ def _build_geometry_job(
             # truncates the tail layers on dense models (e.g. raven_skull), so we disable
             # it for viewer builds and rely on XY/Z sampling for performance.
             max_vertices: int | None = None
+            contour_extractor = _resolve_viewer_contour_extractor()
+            contour_smoothing_iterations = 1
 
             emit_event(
                 LOGGER_BUILD,
@@ -335,6 +420,8 @@ def _build_geometry_job(
                         "geom_backend": backend.name,
                         "phase": phase,
                         "include_fill": bool(include_fill),
+                        "contour_extractor": contour_extractor,
+                        "contour_smoothing_iterations": contour_smoothing_iterations,
                         "quality_ratio": selected_quality_ratio,
                         "sampled_layer_count": sampled_layer_count,
                         "document_layer_count": layer_count,
@@ -369,6 +456,8 @@ def _build_geometry_job(
                 max_vertices=max_vertices,
                 max_xy_stride=1,
                 include_fill=include_fill,
+                contour_extractor=contour_extractor,
+                contour_smoothing_iterations=contour_smoothing_iterations,
                 backend=backend,
                 cache=_VIEWER_BUILD_CACHE,
                 metrics=metrics,
@@ -402,6 +491,8 @@ def _build_geometry_job(
                         "max_vertices_applied": max_vertices,
                         "phase": phase,
                         "include_fill": bool(include_fill),
+                        "contour_extractor": contour_extractor,
+                        "contour_smoothing_iterations": contour_smoothing_iterations,
                         "quality_ratio": selected_quality_ratio,
                         "sampled_layer_count": sampled_layer_count,
                         "document_layer_count": layer_count,
@@ -737,6 +828,21 @@ def _make_viewport(parent=None):
             self._gpu_metrics = GpuMetrics()
             self._log_next_draw = False
             self._palette = _RENDER_PALETTES[0]
+            self._msaa_requested = _resolve_viewer_msaa_samples()
+            self._msaa_effective = 0
+            self._line_width_px = _resolve_viewer_line_width_px()
+            self._point_size_px = _resolve_viewer_point_size_px()
+            self._fill_alpha_scale = _resolve_viewer_fill_alpha_scale()
+            self._gpu_metrics.line_width_px = float(self._line_width_px)
+            self._gpu_metrics.point_size_px = float(self._point_size_px)
+            self._gpu_metrics.fill_alpha_scale = float(self._fill_alpha_scale)
+            try:
+                fmt = self.format()
+                fmt.setSamples(max(0, int(self._msaa_requested)))
+                self.setFormat(fmt)
+            except Exception:
+                # Best-effort: unsupported sample config must not break viewer startup.
+                pass
 
         def initializeGL(self) -> None:  # noqa: N802
             try:
@@ -748,9 +854,34 @@ def _make_viewport(parent=None):
                 if self._funcs is None:
                     self._set_renderer_error("OpenGL functions are unavailable.")
                     return
+                if int(self._msaa_requested) > 0:
+                    self._funcs.glEnable(GL_MULTISAMPLE)
                 self._funcs.glEnable(GL_DEPTH_TEST)
                 self._funcs.glEnable(GL_BLEND)
                 self._funcs.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+                format_samples = 0
+                try:
+                    format_samples = max(0, int(context.format().samples()))
+                except Exception:
+                    format_samples = 0
+                self._msaa_effective = int(format_samples)
+                self._gpu_metrics.msaa_samples = int(self._msaa_effective)
+                emit_event(
+                    LOGGER_GPU,
+                    logging.INFO,
+                    event="gpu.renderer_config",
+                    msg="PWMB GPU renderer config",
+                    component="render3d.gpu",
+                    data={
+                        "render3d": {
+                            "msaa_requested": int(self._msaa_requested),
+                            "msaa_effective": int(self._msaa_effective),
+                            "line_width_px": float(self._line_width_px),
+                            "point_size_px": float(self._point_size_px),
+                            "fill_alpha_scale": float(self._fill_alpha_scale),
+                        }
+                    },
+                )
 
                 program = qopengl_shader_program(self)
                 vertex_shader = """
@@ -822,13 +953,17 @@ def _make_viewport(parent=None):
 
                 tri_ms = 0.0
                 if not self._contour_only:
+                    fill_alpha = max(
+                        0.05,
+                        min(1.0, float(self._palette.fill_rgba[3]) * float(self._fill_alpha_scale)),
+                    )
                     self._program.setUniformValue(
                         "u_color",
                         QtGui.QVector4D(
                             self._palette.fill_rgba[0],
                             self._palette.fill_rgba[1],
                             self._palette.fill_rgba[2],
-                            self._palette.fill_rgba[3],
+                            fill_alpha,
                         ),
                     )
                     tri_ms = self._draw_buffer(
@@ -960,11 +1095,11 @@ def _make_viewport(parent=None):
             if mode == GL_LINES:
                 line_width = getattr(self._funcs, "glLineWidth", None)
                 if callable(line_width):
-                    line_width(1.0)
+                    line_width(max(1.0, float(self._line_width_px)))
             elif mode == GL_POINTS:
                 point_size = getattr(self._funcs, "glPointSize", None)
                 if callable(point_size):
-                    point_size(2.0)
+                    point_size(max(1.0, float(self._point_size_px)))
             for layer_id in layers:
                 layer_range = ranges.get(layer_id)
                 if layer_range is None or layer_range.count <= 0:

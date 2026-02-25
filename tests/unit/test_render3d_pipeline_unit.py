@@ -56,6 +56,7 @@ class _FakeBackend:
         self._geometry = geometry
         self.calls: list[str] = []
         self.contour_document_layer_counts: list[int] = []
+        self.contour_extractors: list[str] = []
         self.include_fill_values: list[bool] = []
 
     def build_contours(
@@ -65,12 +66,14 @@ class _FakeBackend:
         threshold: int,
         binarization_mode: str,
         xy_stride: int,
+        contour_extractor: str = "pixel_edges",
         metrics=None,
         cancel_token=None,
     ) -> PwmbContourStack:
-        _ = (threshold, binarization_mode, xy_stride, metrics, cancel_token)
+        _ = (threshold, binarization_mode, xy_stride, contour_extractor, metrics, cancel_token)
         self.calls.append("contours")
         self.contour_document_layer_counts.append(len(_document.layers))
+        self.contour_extractors.append(str(contour_extractor))
         return self._contour_stack
 
     def build_geometry(
@@ -290,6 +293,153 @@ def test_build_geometry_pipeline_contours_only_uses_distinct_geometry_cache_key(
     )
     assert result.geometry_key == expected_key
     assert backend.include_fill_values == [False]
+
+
+def test_build_geometry_pipeline_smoothing_uses_distinct_cache_keys(tmp_path: Path) -> None:
+    path = tmp_path / "sample.pwmb"
+    path.write_bytes(b"pwmb")
+    document = _document(path)
+    stack = _stack()
+    geometry = _geometry()
+    backend = _FakeBackend(stack, geometry)
+    signature = "sig"
+
+    result = build_geometry_pipeline(
+        document,
+        threshold=1,
+        bin_mode="index_strict",
+        xy_stride=1,
+        contour_smoothing_iterations=1,
+        max_xy_stride=1,
+        file_signature=signature,
+        backend=backend,
+        cache=None,
+    )
+
+    expected_contour_key = make_cache_key(
+        document,
+        threshold=1,
+        bin_mode="index_strict",
+        xy_stride=1,
+        z_stride=1,
+        simplify_epsilon=0.0,
+        max_layers=None,
+        max_vertices=None,
+        render_mode="contours_smooth_i1",
+        file_signature=signature,
+    )
+    expected_geometry_key = make_cache_key(
+        document,
+        threshold=1,
+        bin_mode="index_strict",
+        xy_stride=1,
+        z_stride=1,
+        simplify_epsilon=0.0,
+        max_layers=None,
+        max_vertices=None,
+        render_mode="fill_smooth_i1",
+        file_signature=signature,
+    )
+    assert result.contour_key == expected_contour_key
+    assert result.geometry_key == expected_geometry_key
+
+
+def test_build_geometry_pipeline_non_default_extractor_uses_distinct_cache_keys(tmp_path: Path) -> None:
+    path = tmp_path / "sample.pwmb"
+    path.write_bytes(b"pwmb")
+    document = _document(path)
+    stack = _stack()
+    geometry = _geometry()
+    backend = _FakeBackend(stack, geometry)
+    signature = "sig"
+
+    result = build_geometry_pipeline(
+        document,
+        threshold=1,
+        bin_mode="index_strict",
+        xy_stride=1,
+        contour_extractor="subpixel_halfgrid",
+        max_xy_stride=1,
+        file_signature=signature,
+        backend=backend,
+        cache=None,
+    )
+
+    expected_contour_key = make_cache_key(
+        document,
+        threshold=1,
+        bin_mode="index_strict",
+        xy_stride=1,
+        z_stride=1,
+        simplify_epsilon=0.0,
+        max_layers=None,
+        max_vertices=None,
+        render_mode="contours_ce_subpixel_halfgrid",
+        file_signature=signature,
+    )
+    expected_geometry_key = make_cache_key(
+        document,
+        threshold=1,
+        bin_mode="index_strict",
+        xy_stride=1,
+        z_stride=1,
+        simplify_epsilon=0.0,
+        max_layers=None,
+        max_vertices=None,
+        render_mode="fill_ce_subpixel_halfgrid",
+        file_signature=signature,
+    )
+    assert result.contour_key == expected_contour_key
+    assert result.geometry_key == expected_geometry_key
+    assert backend.contour_extractors == ["subpixel_halfgrid"]
+
+
+def test_build_geometry_pipeline_smoothing_modifies_contours_before_geometry(tmp_path: Path) -> None:
+    path = tmp_path / "sample.pwmb"
+    path.write_bytes(b"pwmb")
+    document = _document(path)
+    source_stack = PwmbContourStack(
+        pitch_x_mm=0.05,
+        pitch_y_mm=0.05,
+        pitch_z_mm=0.05,
+        layers={
+            0: LayerLoops(
+                outer=[[(0.0, 0.0), (4.0, 0.0), (4.0, 2.0), (0.0, 2.0)]],
+                holes=[],
+            )
+        },
+    )
+    geometry = _geometry()
+
+    class _SmoothingBackend:
+        name = "fake"
+
+        def __init__(self) -> None:
+            self.geometry_contour_stack: PwmbContourStack | None = None
+
+        def build_contours(self, _document, **_kwargs):  # type: ignore[no-untyped-def]
+            return source_stack
+
+        def build_geometry(self, contour_stack, **_kwargs):  # type: ignore[no-untyped-def]
+            self.geometry_contour_stack = contour_stack
+            return geometry
+
+    backend = _SmoothingBackend()
+    result = build_geometry_pipeline(
+        document,
+        threshold=1,
+        bin_mode="index_strict",
+        xy_stride=1,
+        contour_smoothing_iterations=1,
+        max_xy_stride=1,
+        backend=backend,
+        cache=None,
+    )
+
+    assert backend.geometry_contour_stack is not None
+    assert backend.geometry_contour_stack is result.contour_stack
+    assert result.contour_stack is not source_stack
+    assert result.contour_stack.layers[0].outer[0] != source_stack.layers[0].outer[0]
 
 
 def test_build_geometry_pipeline_cancels_before_backend_calls(tmp_path: Path) -> None:

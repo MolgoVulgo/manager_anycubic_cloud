@@ -65,15 +65,20 @@ def _compare_case(
     max_xy_stride: int,
     area_tol: float,
     cpp_contours_impl: str | None,
+    cpp_opencv_approx: str | None,
 ) -> dict[str, Any]:
     signature = compute_file_signature(path)
     document = read_pwmb_document(path)
 
     py_backend = resolve_geometry_backend(preferred="python")
     prev_cpp_impl = os.getenv("GEOM_CPP_CONTOURS_IMPL")
+    prev_cpp_opencv_approx = os.getenv("GEOM_CPP_OPENCV_APPROX")
     cpp_impl_effective: str | None = None
+    cpp_opencv_approx_effective: str | None = None
     if cpp_contours_impl is not None:
         os.environ["GEOM_CPP_CONTOURS_IMPL"] = str(cpp_contours_impl)
+    if cpp_opencv_approx is not None:
+        os.environ["GEOM_CPP_OPENCV_APPROX"] = str(cpp_opencv_approx)
     try:
         cpp_backend = resolve_geometry_backend(preferred="cpp")
         if cpp_backend.name != "cpp":
@@ -117,12 +122,23 @@ def _compare_case(
                 cpp_impl_effective = str(getter())
             except Exception:
                 cpp_impl_effective = None
+        approx_getter = getattr(module, "current_opencv_approx", None)
+        if callable(approx_getter):
+            try:
+                cpp_opencv_approx_effective = str(approx_getter())
+            except Exception:
+                cpp_opencv_approx_effective = None
     finally:
         if cpp_contours_impl is not None:
             if prev_cpp_impl is None:
                 os.environ.pop("GEOM_CPP_CONTOURS_IMPL", None)
             else:
                 os.environ["GEOM_CPP_CONTOURS_IMPL"] = prev_cpp_impl
+        if cpp_opencv_approx is not None:
+            if prev_cpp_opencv_approx is None:
+                os.environ.pop("GEOM_CPP_OPENCV_APPROX", None)
+            else:
+                os.environ["GEOM_CPP_OPENCV_APPROX"] = prev_cpp_opencv_approx
 
     py_invariants = build_invariant_snapshot(py_result.contour_stack, py_result.geometry)
     cpp_invariants = build_invariant_snapshot(cpp_result.contour_stack, cpp_result.geometry)
@@ -144,6 +160,8 @@ def _compare_case(
         "max_xy_stride": max_xy_stride,
         "cpp_contours_impl_requested": str(cpp_contours_impl) if cpp_contours_impl is not None else None,
         "cpp_contours_impl_effective": cpp_impl_effective,
+        "cpp_opencv_approx_requested": str(cpp_opencv_approx) if cpp_opencv_approx is not None else None,
+        "cpp_opencv_approx_effective": cpp_opencv_approx_effective,
         "pass": passes,
         "python": {
             "metrics": py_metrics.as_log_data(),
@@ -191,6 +209,12 @@ def main() -> int:
         choices=["native", "opencv", "auto"],
         help="C++ contour implementation selector.",
     )
+    parser.add_argument(
+        "--cpp-opencv-approx",
+        default=None,
+        choices=["simple", "tc89_l1", "tc89_kcos"],
+        help="OpenCV contour approximation mode (used when cpp contours impl resolves to opencv).",
+    )
     parser.add_argument("--area-tol", type=float, default=1e-3, help="Absolute tolerance for area deltas.")
     parser.add_argument("--output", type=Path, default=None, help="Write JSON report to this path.")
     args = parser.parse_args()
@@ -214,6 +238,7 @@ def main() -> int:
                 max_xy_stride=max(1, int(args.max_xy_stride)),
                 area_tol=max(0.0, float(args.area_tol)),
                 cpp_contours_impl=str(args.cpp_contours_impl) if args.cpp_contours_impl is not None else None,
+                cpp_opencv_approx=str(args.cpp_opencv_approx) if args.cpp_opencv_approx is not None else None,
             )
             report["results"].append(result)
         except Exception as exc:

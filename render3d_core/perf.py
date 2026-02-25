@@ -49,6 +49,10 @@ class GpuMetrics:
     vbo_bytes_line: int = 0
     vbo_bytes_point: int = 0
     visible_layers_count: int = 0
+    msaa_samples: int = 0
+    line_width_px: float = 1.0
+    point_size_px: float = 1.0
+    fill_alpha_scale: float = 1.0
 
     def as_log_data(self) -> dict[str, object]:
         return {
@@ -60,4 +64,8 @@ class GpuMetrics:
             "vbo_bytes_line": int(self.vbo_bytes_line),
             "vbo_bytes_point": int(self.vbo_bytes_point),
             "visible_layers_count": int(self.visible_layers_count),
+            "msaa_samples": int(self.msaa_samples),
+            "line_width_px": round(self.line_width_px, 3),
+            "point_size_px": round(self.point_size_px, 3),
+            "fill_alpha_scale": round(self.fill_alpha_scale, 3),
         }

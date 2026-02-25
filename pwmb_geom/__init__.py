@@ -14,8 +14,10 @@ from render3d_core.types import PwmbContourGeometry, PwmbContourStack
 
 LOGGER = logging.getLogger("render3d.backend.cpp")
 GEOM_CPP_CONTOURS_IMPL_ENV = "GEOM_CPP_CONTOURS_IMPL"
+GEOM_CPP_OPENCV_APPROX_ENV = "GEOM_CPP_OPENCV_APPROX"
 GEOM_CPP_TRIANGULATION_IMPL_ENV = "GEOM_CPP_TRIANGULATION_IMPL"
 _VALID_CONTOUR_IMPLS = {"native", "opencv", "auto"}
+_VALID_OPENCV_APPROX = {"simple", "tc89_l1", "tc89_kcos"}
 _VALID_TRIANGULATION_IMPLS = {"native", "python", "auto"}
 _WARNED_KEYS: set[str] = set()
 
@@ -61,6 +63,18 @@ def _probe_impl_argument_support() -> bool:
 _NATIVE_SUPPORTS_IMPL_ARG = _probe_impl_argument_support()
 
 
+def _probe_opencv_approx_argument_support() -> bool:
+    probe = np.zeros((1, 1), dtype=np.uint8)
+    try:
+        _native_extract_polygons(probe, "native", "simple")
+    except TypeError:
+        return False
+    return True
+
+
+_NATIVE_SUPPORTS_OPENCV_APPROX_ARG = _probe_opencv_approx_argument_support()
+
+
 def has_opencv_contours() -> bool:
     if _native_has_opencv_contours is None:
         return False
@@ -90,6 +104,20 @@ def current_contours_impl() -> str:
             GEOM_CPP_CONTOURS_IMPL_ENV,
         )
         return "native"
+    return requested
+
+
+def current_opencv_approx() -> str:
+    raw_value = os.getenv(GEOM_CPP_OPENCV_APPROX_ENV, "simple")
+    requested = str(raw_value).strip().lower() or "simple"
+    if requested not in _VALID_OPENCV_APPROX:
+        _warn_once(
+            "invalid_cpp_opencv_approx",
+            "Unknown %s=%r, fallback to simple",
+            GEOM_CPP_OPENCV_APPROX_ENV,
+            raw_value,
+        )
+        return "simple"
     return requested
 
 
@@ -130,6 +158,7 @@ def build_contours(
     threshold: int,
     binarization_mode: str,
     xy_stride: int,
+    contour_extractor: str = "pixel_edges",
     metrics: BuildMetrics | None = None,
     cancel_token: object | None = None,
 ) -> PwmbContourStack:
@@ -138,6 +167,7 @@ def build_contours(
         threshold=threshold,
         binarization_mode=binarization_mode,
         xy_stride=xy_stride,
+        contour_extractor=contour_extractor,
         metrics=metrics,
         pixel_extractor=_extract_native_layer_loops,
         cancel_token=cancel_token,
@@ -170,7 +200,17 @@ def build_geometry(
 
 def _extract_native_layer_loops(mask: np.ndarray) -> PixelLayerLoops:
     impl = current_contours_impl()
-    if _NATIVE_SUPPORTS_IMPL_ARG:
+    opencv_approx = current_opencv_approx()
+    if _NATIVE_SUPPORTS_OPENCV_APPROX_ARG:
+        payload = _native_extract_polygons(mask, impl, opencv_approx)
+    elif _NATIVE_SUPPORTS_IMPL_ARG:
+        if opencv_approx != "simple":
+            _warn_once(
+                "opencv_approx_arg_not_supported",
+                "Native module does not support opencv approx selection; ignoring %s=%s",
+                GEOM_CPP_OPENCV_APPROX_ENV,
+                opencv_approx,
+            )
         payload = _native_extract_polygons(mask, impl)
     else:
         if impl != "native":
@@ -179,6 +219,13 @@ def _extract_native_layer_loops(mask: np.ndarray) -> PixelLayerLoops:
                 "Native module does not support impl selection; ignoring %s=%s",
                 GEOM_CPP_CONTOURS_IMPL_ENV,
                 impl,
+            )
+        if opencv_approx != "simple":
+            _warn_once(
+                "opencv_approx_arg_not_supported_legacy",
+                "Native module does not support opencv approx selection; ignoring %s=%s",
+                GEOM_CPP_OPENCV_APPROX_ENV,
+                opencv_approx,
             )
         payload = _native_extract_polygons(mask)
     if not isinstance(payload, dict):

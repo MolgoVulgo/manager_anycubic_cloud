@@ -301,7 +301,19 @@ std::vector<PointKey> contour_to_grid_loop(const std::vector<cv::Point>& contour
     return encoded;
 }
 
-PolygonSet extract_polygons_opencv_impl(const std::uint8_t* data, int width, int height) {
+int opencv_chain_mode(OpenCvApprox approx) {
+    switch (approx) {
+        case OpenCvApprox::kSimple:
+            return cv::CHAIN_APPROX_SIMPLE;
+        case OpenCvApprox::kTc89L1:
+            return cv::CHAIN_APPROX_TC89_L1;
+        case OpenCvApprox::kTc89Kcos:
+            return cv::CHAIN_APPROX_TC89_KCOS;
+    }
+    return cv::CHAIN_APPROX_SIMPLE;
+}
+
+PolygonSet extract_polygons_opencv_impl(const std::uint8_t* data, int width, int height, OpenCvApprox approx) {
     const int expanded_width = width * 2;
     const int expanded_height = height * 2;
     cv::Mat expanded(expanded_height, expanded_width, CV_8UC1, cv::Scalar(0));
@@ -317,7 +329,7 @@ PolygonSet extract_polygons_opencv_impl(const std::uint8_t* data, int width, int
 
     std::vector<std::vector<cv::Point>> contours;
     std::vector<cv::Vec4i> hierarchy;
-    cv::findContours(expanded, contours, hierarchy, cv::RETR_CCOMP, cv::CHAIN_APPROX_SIMPLE);
+    cv::findContours(expanded, contours, hierarchy, cv::RETR_CCOMP, opencv_chain_mode(approx));
     if (contours.empty()) {
         return {};
     }
@@ -433,7 +445,12 @@ PolygonSet extract_polygons_native_impl(const std::uint8_t* data, int width, int
 
 }  // namespace
 
-PolygonSet extract_polygons(const std::uint8_t* data, int width, int height, ContourImpl impl) {
+PolygonSet extract_polygons(
+    const std::uint8_t* data,
+    int width,
+    int height,
+    ContourImpl impl,
+    OpenCvApprox opencv_approx) {
     if (data == nullptr) {
         throw std::invalid_argument("extract_polygons: null mask pointer");
     }
@@ -446,7 +463,7 @@ PolygonSet extract_polygons(const std::uint8_t* data, int width, int height, Con
             return extract_polygons_native_impl(data, width, height);
         case ContourImpl::kOpenCV:
 #ifdef PWMB_GEOM_WITH_OPENCV
-            return extract_polygons_opencv_impl(data, width, height);
+            return extract_polygons_opencv_impl(data, width, height, opencv_approx);
 #else
             throw std::runtime_error(
                 "extract_polygons: OpenCV contours requested but module was built without WITH_OPENCV");

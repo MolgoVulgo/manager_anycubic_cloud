@@ -67,3 +67,20 @@ Contexte: migration render3d Python -> C++ en cours, avec pipeline unifie et bac
 - [x] Tests integration viewer (build async -> upload -> draw/ranges visibles).
 - [x] Goldens PWMB de non-regression (orientation/bbox/checksum).
 - [x] E2E GUI minimal depuis Files -> Viewer -> rebuild -> cutoff/stride.
+
+## Qualite contours percue (nouveau)
+
+### Lot K - Contours moins "carres" en preview
+- [x] K1: qualite 100% -> `xy_stride=1` force.
+- [x] K1: downsampling XY par blocs (`any/max pooling`) au lieu de decimation brute.
+- [x] K2: smoothing preview des loops (1 passe) avec garde-fous aire/bbox + orientation.
+- [x] K3: extraction subpixel half-grid en option backend/pipeline (`contour_extractor`), active dans le viewer.
+- [x] K4: comparaison OpenCV orientee lissage (`TC89_*`) vs natif.
+  - Campagne z4/xy4 executee (`simple` vs `tc89_l1` vs `tc89_kcos`) avec synthese dediee.
+  - Decision: `simple` reste la meilleure option OpenCV; default global conserve sur `cpp(native)`.
+- [x] K5: finitions GPU (AA/palette/epaisseur contours) orientees lisibilite.
+  - MSAA active (best-effort) + logs `requested/effective`.
+  - Style draw ajuste: line width, point size, fill alpha scale (configurables via env).
+
+Reference:
+- `docs/53_LOT_K_CONTOURS_QUALITY.md`

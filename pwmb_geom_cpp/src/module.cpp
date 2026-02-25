@@ -35,9 +35,26 @@ pwmb_geom::ContourImpl parse_impl(std::string impl) {
     throw std::invalid_argument("extract_polygons: invalid impl (expected native|opencv|auto)");
 }
 
+pwmb_geom::OpenCvApprox parse_opencv_approx(std::string approx) {
+    std::transform(approx.begin(), approx.end(), approx.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (approx == "simple" || approx == "chain_approx_simple") {
+        return pwmb_geom::OpenCvApprox::kSimple;
+    }
+    if (approx == "tc89_l1" || approx == "chain_approx_tc89_l1") {
+        return pwmb_geom::OpenCvApprox::kTc89L1;
+    }
+    if (approx == "tc89_kcos" || approx == "chain_approx_tc89_kcos") {
+        return pwmb_geom::OpenCvApprox::kTc89Kcos;
+    }
+    throw std::invalid_argument("extract_polygons: invalid opencv_approx (expected simple|tc89_l1|tc89_kcos)");
+}
+
 py::dict extract_polygons_py(
     const py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast>& mask,
-    const std::string& impl) {
+    const std::string& impl,
+    const std::string& opencv_approx) {
     const py::buffer_info info = mask.request();
     if (info.ndim != 2) {
         throw std::invalid_argument("extract_polygons expects a 2D uint8 mask");
@@ -49,7 +66,9 @@ py::dict extract_polygons_py(
     const int height = static_cast<int>(info.shape[0]);
     const int width = static_cast<int>(info.shape[1]);
     const pwmb_geom::ContourImpl selected_impl = parse_impl(impl);
-    const pwmb_geom::PolygonSet polygons = pwmb_geom::extract_polygons(data, width, height, selected_impl);
+    const pwmb_geom::OpenCvApprox selected_approx = parse_opencv_approx(opencv_approx);
+    const pwmb_geom::PolygonSet polygons =
+        pwmb_geom::extract_polygons(data, width, height, selected_impl, selected_approx);
 
     py::dict payload;
     payload["outer"] = polygons.outer;
@@ -176,7 +195,12 @@ py::dict triangulate_polygon_with_holes_indexed_py(
 
 PYBIND11_MODULE(_pwmb_geom, module) {
     module.doc() = "PWMB contour extraction native helpers";
-    module.def("extract_polygons", &extract_polygons_py, py::arg("mask"), py::arg("impl") = "native");
+    module.def(
+        "extract_polygons",
+        &extract_polygons_py,
+        py::arg("mask"),
+        py::arg("impl") = "native",
+        py::arg("opencv_approx") = "simple");
     module.def("has_opencv_contours", []() { return pwmb_geom::opencv_contours_available(); });
     module.def(
         "triangulate_polygon_with_holes",

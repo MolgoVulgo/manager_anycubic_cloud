@@ -1,0 +1,163 @@
+{
+  "backend_requested": "cpp",
+  "files_total": 3,
+  "results": [
+    {
+      "file": "/home/kaj/Develop/python/manager_anycubic_cloud/pwmb_files/cube.pwmb",
+      "file_signature": "size=2292920:mtime=1771666298614342397:sha1=f7a1a9dea0d2290f3f87d3abc0ee4b54e4aee5fc",
+      "backend": "cpp",
+      "threshold": 1,
+      "bin_mode": "index_strict",
+      "xy_stride": 4,
+      "z_stride": 4,
+      "max_layers": null,
+      "max_vertices": null,
+      "max_xy_stride": 1,
+      "metrics": {
+        "parse_ms": 0.637,
+        "decode_ms_total": 362.509,
+        "decode_mb_s": 1.454,
+        "contours_ms_total": 3955.955,
+        "triangulation_ms_total": 0.843,
+        "buffers_ms_total": 0.338,
+        "layers_total": 50,
+        "layers_built": 50,
+        "layers_skipped": 0,
+        "loops_total": 50,
+        "vertices_total": 900,
+        "triangles_total": 100,
+        "pool_kind": "threads",
+        "workers": 1
+      },
+      "invariants": {
+        "contour_area_mm2": 5114.00903,
+        "mesh_area_mm2": 5114.009476,
+        "contour_bbox": [
+          -5.091200225830079,
+          -5.091200225830079,
+          4.953600219726563,
+          5.091200225830079
+        ],
+        "mesh_bbox": [
+          -5.091200351715088,
+          -5.091200351715088,
+          -4.900000095367432,
+          4.9536004066467285,
+          5.091200351715088,
+          4.900000095367432
+        ],
+        "triangle_count": 100,
+        "degenerate_triangles": 0
+      },
+      "cpp_contours_impl_requested": "opencv",
+      "cpp_contours_impl_effective": "opencv",
+      "cpp_opencv_approx_requested": "tc89_kcos",
+      "cpp_opencv_approx_effective": "tc89_kcos"
+    },
+    {
+      "file": "/home/kaj/Develop/python/manager_anycubic_cloud/pwmb_files/raven_skull-12-25-v3.pwmb",
+      "file_signature": "size=68287039:mtime=1771975218573532840:sha1=98f61d991cba793816aa289934117454b8957075",
+      "backend": "cpp",
+      "threshold": 1,
+      "bin_mode": "index_strict",
+      "xy_stride": 4,
+      "z_stride": 4,
+      "max_layers": null,
+      "max_vertices": null,
+      "max_xy_stride": 1,
+      "metrics": {
+        "parse_ms": 1.123,
+        "decode_ms_total": 6116.917,
+        "decode_mb_s": 2.682,
+        "contours_ms_total": 13401.341,
+        "triangulation_ms_total": 6145.463,
+        "buffers_ms_total": 1433.871,
+        "layers_total": 147,
+        "layers_built": 146,
+        "layers_skipped": 1,
+        "loops_total": 45206,
+        "vertices_total": 5492823,
+        "triangles_total": 926055,
+        "pool_kind": "threads",
+        "workers": 1
+      },
+      "invariants": {
+        "contour_area_mm2": 214718.750338,
+        "mesh_area_mm2": 214718.758007,
+        "contour_bbox": [
+          -84.07360372924805,
+          -57.516802551269535,
+          85.17440377807618,
+          57.10400253295899
+        ],
+        "mesh_bbox": [
+          -84.07360076904297,
+          -57.51680374145508,
+          -14.5,
+          85.17440032958984,
+          57.10400390625,
+          14.5
+        ],
+        "triangle_count": 926055,
+        "degenerate_triangles": 0
+      },
+      "cpp_contours_impl_requested": "opencv",
+      "cpp_contours_impl_effective": "opencv",
+      "cpp_opencv_approx_requested": "tc89_kcos",
+      "cpp_opencv_approx_effective": "tc89_kcos"
+    },
+    {
+      "file": "/home/kaj/Develop/python/manager_anycubic_cloud/pwmb_files/raven_skull_19_12.pwmb",
+      "file_signature": "size=60607926:mtime=1771975252767395953:sha1=5ce4906ed5a5f39500964be660590824b5f55a0b",
+      "backend": "cpp",
+      "threshold": 1,
+      "bin_mode": "index_strict",
+      "xy_stride": 4,
+      "z_stride": 4,
+      "max_layers": null,
+      "max_vertices": null,
+      "max_xy_stride": 1,
+      "metrics": {
+        "parse_ms": 1.779,
+        "decode_ms_total": 5973.915,
+        "decode_mb_s": 2.425,
+        "contours_ms_total": 18682.759,
+        "triangulation_ms_total": 12894.021,
+        "buffers_ms_total": 1909.824,
+        "layers_total": 209,
+        "layers_built": 209,
+        "layers_skipped": 0,
+        "loops_total": 68456,
+        "vertices_total": 7210050,
+        "triangles_total": 1233924,
+        "pool_kind": "threads",
+        "workers": 1
+      },
+      "invariants": {
+        "contour_area_mm2": 239022.893648,
+        "mesh_area_mm2": 257843.260741,
+        "contour_bbox": [
+          -77.19360342407228,
+          -50.08640222167969,
+          77.19360342407228,
+          50.08640222167969
+        ],
+        "mesh_bbox": [
+          -77.193603515625,
+          -50.086402893066406,
+          -20.80000114440918,
+          77.193603515625,
+          50.086402893066406,
+          20.80000114440918
+        ],
+        "triangle_count": 1233924,
+        "degenerate_triangles": 0
+      },
+      "cpp_contours_impl_requested": "opencv",
+      "cpp_contours_impl_effective": "opencv",
+      "cpp_opencv_approx_requested": "tc89_kcos",
+      "cpp_opencv_approx_effective": "tc89_kcos"
+    }
+  ],
+  "errors": []
+}

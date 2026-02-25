@@ -62,6 +62,10 @@ Définir un contrat unique entre “extraction” et “mesh builder”, pour po
 - Implémenté (Lot C) : **extracteur natif C++** (edge-boundary extraction),
   - port sémantique de la logique Python (`_extract_loops` + classification outer/holes),
   - exposé via `pybind11` dans le module `_pwmb_geom`.
+- Limite visuelle connue :
+  - contours issus d'un raster binaire => rendu naturellement orthogonal/"en escalier",
+  - plan d'amelioration UX contours documente dans `docs/53_LOT_K_CONTOURS_QUALITY.md`.
+  - etat courant: viewer integre un extracteur subpixel half-grid (Lot K3) en option pipeline.
 - Recommandation initiale (alternative) : **OpenCV** en C++
   - `findContours` avec hiérarchie pour outer/holes (RETR_TREE/CCOMP),
   - compression des points (CHAIN_APPROX_SIMPLE).
@@ -165,3 +169,4 @@ Définir un contrat unique entre “extraction” et “mesh builder”, pour po
 5. Buffers contigus
 6. I/O mmap persistant
 7. Parallélisation
+8. Qualite percue contours viewer (Lot K: XY stride 100%, downsampling, smoothing)

@@ -9,7 +9,7 @@ import pytest
 
 from accloud_core.logging_contract import JsonLineFormatter, operation_context
 from pwmb_core.types import HeaderInfo, LayerDef, MachineInfo, PwmbDocument
-from render3d_core.contours import PixelLayerLoops, build_contour_stack
+from render3d_core.contours import PixelLayerLoops, build_contour_stack, smooth_contour_stack_preview
 from render3d_core.geometry_v2 import build_geometry_v2
 from render3d_core.perf import BuildMetrics
 from render3d_core.task_runner import CancellationToken, CancelledError
@@ -177,6 +177,97 @@ def test_build_contour_stack_xy_stride_preserves_world_size(monkeypatch: pytest.
     area_full = abs(_polygon_area(stack_full.layers[0].outer[0]))
     area_down = abs(_polygon_area(stack_down.layers[0].outer[0]))
     assert area_down == pytest.approx(area_full, rel=1e-6)
+
+
+def test_build_contour_stack_xy_stride_downsample_keeps_thin_features(monkeypatch: pytest.MonkeyPatch) -> None:
+    document = _make_document(width=4, height=4, layers=1)
+    decoded = np.asarray(
+        [
+            0, 0, 0, 0,
+            0, 255, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 0,
+        ],
+        dtype=np.uint8,
+    )
+    monkeypatch.setattr("render3d_core.contours.decode_layer", lambda *_args, **_kwargs: decoded)
+    monkeypatch.setattr("render3d_core.contours.decode_layer_index_mask", lambda *_args, **_kwargs: decoded)
+
+    stack_down = build_contour_stack(document, threshold=1, binarization_mode="index_strict", xy_stride=2)
+
+    assert 0 in stack_down.layers
+    assert len(stack_down.layers[0].outer) == 1
+    assert abs(_polygon_area(stack_down.layers[0].outer[0])) > 0.0
+
+
+def test_build_contour_stack_subpixel_extractor_keeps_area_with_fractional_vertices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = _make_document(width=3, height=3, layers=1)
+    decoded = np.asarray(
+        [
+            255, 255, 0,
+            255, 255, 255,
+            0, 255, 255,
+        ],
+        dtype=np.uint8,
+    )
+    monkeypatch.setattr("render3d_core.contours.decode_layer", lambda *_args, **_kwargs: decoded)
+    monkeypatch.setattr("render3d_core.contours.decode_layer_index_mask", lambda *_args, **_kwargs: decoded)
+
+    stack_ref = build_contour_stack(
+        document,
+        threshold=1,
+        binarization_mode="index_strict",
+        contour_extractor="pixel_edges",
+    )
+    stack_sub = build_contour_stack(
+        document,
+        threshold=1,
+        binarization_mode="index_strict",
+        contour_extractor="subpixel_halfgrid",
+    )
+
+    area_ref = _stack_area_mm2(stack_ref)
+    area_sub = _stack_area_mm2(stack_sub)
+    assert area_sub == pytest.approx(area_ref, rel=0.12)
+
+    points = stack_sub.layers[0].outer[0]
+    assert any((abs(point[0] - round(point[0])) > 1e-6) or (abs(point[1] - round(point[1])) > 1e-6) for point in points)
+
+
+def test_smooth_contour_stack_preview_preserves_area_and_bbox() -> None:
+    original_loop = [(0.0, 0.0), (4.0, 0.0), (4.0, 2.0), (0.0, 2.0)]
+    stack = PwmbContourStack(
+        pitch_x_mm=0.05,
+        pitch_y_mm=0.05,
+        pitch_z_mm=0.05,
+        layers={
+            0: LayerLoops(
+                outer=[original_loop],
+                holes=[],
+            )
+        },
+    )
+
+    smoothed = smooth_contour_stack_preview(stack, iterations=1)
+    assert smoothed is not stack
+    smoothed_loop = smoothed.layers[0].outer[0]
+    assert smoothed_loop != original_loop
+
+    area_ref = abs(_polygon_area(original_loop))
+    area_smoothed = abs(_polygon_area(smoothed_loop))
+    assert area_smoothed == pytest.approx(area_ref, rel=0.08)
+
+    def _bbox(loop: list[tuple[float, float]]) -> tuple[float, float]:
+        xs = [point[0] for point in loop]
+        ys = [point[1] for point in loop]
+        return (max(xs) - min(xs), max(ys) - min(ys))
+
+    bw_ref, bh_ref = _bbox(original_loop)
+    bw_smooth, bh_smooth = _bbox(smoothed_loop)
+    assert bw_smooth == pytest.approx(bw_ref, rel=0.06)
+    assert bh_smooth == pytest.approx(bh_ref, rel=0.06)
 
 
 def test_build_contour_stack_accepts_custom_pixel_extractor(monkeypatch: pytest.MonkeyPatch) -> None:

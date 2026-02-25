@@ -19,11 +19,18 @@ enum class ContourImpl {
     kOpenCV,
 };
 
+enum class OpenCvApprox {
+    kSimple,
+    kTc89L1,
+    kTc89Kcos,
+};
+
 PolygonSet extract_polygons(
     const std::uint8_t* data,
     int width,
     int height,
-    ContourImpl impl = ContourImpl::kNative);
+    ContourImpl impl = ContourImpl::kNative,
+    OpenCvApprox opencv_approx = OpenCvApprox::kSimple);
 
 bool opencv_contours_available() noexcept;
 
