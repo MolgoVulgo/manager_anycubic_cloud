@@ -14,3 +14,29 @@ log.txt
 uc.makeronline.com.har
 docs_old/
 accloud_fault.log.*
+
+# OS / editor
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
+*.iml
+
+# Local PWMB samples (manual QA inputs)
+pwmb_files/
+
+# Python packaging artifacts
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+.coverage
+coverage.xml
+htmlcov/
+
+# Native extension artifacts
+pwmb_geom/_pwmb_geom*.so
+pwmb_geom/__pycache__/
+pwmb_geom_cpp/build/
+pwmb_geom_cpp/build-*/
