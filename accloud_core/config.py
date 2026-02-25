@@ -39,14 +39,21 @@ class AppConfig:
     cache_startup_ttl_s: int = 600
     cache_gcode_ttl_s: int = 86400
     cache_thumbnail_ttl_s: int = 86400 * 7
-    http_log_path: Path = Path("accloud_http.log")
-    http_log_retention_days: int = 14
-    fault_log_path: Path = Path("accloud_fault.log")
+    log_dir: Path = Path(".accloud") / "logs"
+    app_log_path: Path = Path(".accloud") / "logs" / "accloud_app.log"
+    http_log_path: Path = Path(".accloud") / "logs" / "accloud_http.log"
+    render3d_log_path: Path = Path(".accloud") / "logs" / "accloud_render3d.log"
+    fault_log_path: Path = Path(".accloud") / "logs" / "accloud_fault.log"
+    log_max_bytes: int = 10 * 1024 * 1024
+    log_backups: int = 5
+    log_compress: bool = True
+    log_compress_level: int = 6
     retry: RetryConfig = field(default_factory=RetryConfig)
     pool_kind: str = "threads"
     workers: int = 4
     enable_fault_handler: bool = True
     log_level: str = "INFO"
+    http_log_level: str = "INFO"
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -54,6 +61,47 @@ class AppConfig:
         max_attempts = int(os.getenv("ACCLOUD_RETRY_MAX_ATTEMPTS", "3"))
         base_delay_s = float(os.getenv("ACCLOUD_RETRY_BASE_DELAY_S", "0.5"))
         max_delay_s = float(os.getenv("ACCLOUD_RETRY_MAX_DELAY_S", "5.0"))
+        log_dir = Path(os.getenv("ACCLOUD_LOG_DIR", str(defaults.log_dir)))
+        app_log_path = Path(
+            os.getenv(
+                "ACCLOUD_APP_LOG_PATH",
+                str(log_dir / "accloud_app.log"),
+            )
+        )
+        http_log_path = Path(
+            os.getenv(
+                "ACCLOUD_HTTP_LOG_PATH",
+                str(log_dir / "accloud_http.log"),
+            )
+        )
+        render3d_log_path = Path(
+            os.getenv(
+                "ACCLOUD_RENDER3D_LOG_PATH",
+                str(log_dir / "accloud_render3d.log"),
+            )
+        )
+        fault_log_path = Path(
+            os.getenv(
+                "ACCLOUD_FAULT_LOG_PATH",
+                str(log_dir / "accloud_fault.log"),
+            )
+        )
+        legacy_backups = max(
+            1,
+            int(os.getenv("ACCLOUD_HTTP_LOG_RETENTION_DAYS", str(defaults.log_backups))),
+        )
+        log_backups = max(
+            1,
+            int(os.getenv("ACCLOUD_LOG_BACKUPS", str(legacy_backups))),
+        )
+        log_max_bytes = max(
+            1,
+            int(os.getenv("ACCLOUD_LOG_MAX_BYTES", str(defaults.log_max_bytes))),
+        )
+        log_compress_level = max(
+            1,
+            min(9, int(os.getenv("ACCLOUD_LOG_COMPRESS_LEVEL", str(defaults.log_compress_level)))),
+        )
 
         return cls(
             base_url=os.getenv("ACCLOUD_BASE_URL", defaults.base_url),
@@ -81,12 +129,15 @@ class AppConfig:
                 0,
                 int(os.getenv("ACCLOUD_CACHE_THUMBNAIL_TTL_S", str(defaults.cache_thumbnail_ttl_s))),
             ),
-            http_log_path=Path(os.getenv("ACCLOUD_HTTP_LOG_PATH", str(defaults.http_log_path))),
-            http_log_retention_days=max(
-                1,
-                int(os.getenv("ACCLOUD_HTTP_LOG_RETENTION_DAYS", str(defaults.http_log_retention_days))),
-            ),
-            fault_log_path=Path(os.getenv("ACCLOUD_FAULT_LOG_PATH", str(defaults.fault_log_path))),
+            log_dir=log_dir,
+            app_log_path=app_log_path,
+            http_log_path=http_log_path,
+            render3d_log_path=render3d_log_path,
+            fault_log_path=fault_log_path,
+            log_max_bytes=log_max_bytes,
+            log_backups=log_backups,
+            log_compress=_env_bool("ACCLOUD_LOG_COMPRESS", defaults.log_compress),
+            log_compress_level=log_compress_level,
             retry=RetryConfig(
                 max_attempts=max(1, max_attempts),
                 base_delay_s=max(0.0, base_delay_s),
@@ -96,4 +147,5 @@ class AppConfig:
             workers=max(1, int(os.getenv("ACCLOUD_WORKERS", str(defaults.workers)))),
             enable_fault_handler=_env_bool("ACCLOUD_ENABLE_FAULT_HANDLER", defaults.enable_fault_handler),
             log_level=os.getenv("ACCLOUD_LOG_LEVEL", defaults.log_level).upper(),
+            http_log_level=os.getenv("ACCLOUD_HTTP_LOG_LEVEL", defaults.http_log_level).upper(),
         )

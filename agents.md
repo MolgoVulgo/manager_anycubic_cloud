@@ -272,3 +272,50 @@ Si manquant :
 - Si plusieurs intentions distinctes apparaissent dans le diff, **split en commits séparés** (cohérents et minimaux).
 - Forme : impératif, intention principale (ex: `Fix pw0Img RLE decoding`, `Add GPU draw pipeline contracts`).
 
+#### Prompt standard: Commit Generator
+Utiliser ce prompt pour générer un message de commit orienté audit/PR review :
+
+```text
+Rédige un message de commit Git en français, orienté audit/PR review.
+
+Contraintes:
+- Titre en anglais, format conventional commit: <type>(<scope>): <summary>
+- Corps en puces, concret, sans phrases vagues.
+- Mentionner explicitement:
+  - changements fonctionnels,
+  - robustesse/gestion d’erreurs,
+  - tests ajoutés ou modifiés,
+  - docs mises à jour.
+- Ajouter une ligne finale "Tests:" avec la commande exécutée et le résultat.
+- Ajouter une ligne finale "Docs:" avec les fichiers de documentation touchés.
+- Ne pas inventer d’éléments non présents dans le diff.
+
+Format attendu:
+<type>(<scope>): <summary>
+
+- ...
+- ...
+- ...
+
+Tests: <commande> (<résultat>)
+Docs: <liste de fichiers ou "none">
+```
+
+Exemple attendu:
+
+```text
+feat(render3d): harden viewer reliability and complete remaining QA tasks
+
+- Add robust OpenGL failure handling in PWMB 3D dialog (init/draw/upload fallback paths).
+- Add user-facing build error classification (parse/decode/GL) and "Retry last build" flow.
+- Persist viewer settings across sessions (threshold/bin mode/quality/stride/contour-only).
+- Enforce strict index mask semantics (color_index != 0) via dedicated PW0 nonzero-mask decoding.
+- Add camera-based back-to-front layer ordering for translucent rendering.
+- Add integration tests for async viewer build, retry behavior, and renderer-failure UX.
+- Add minimal GUI E2E flow: Files -> Viewer -> rebuild -> cutoff/stride.
+- Add golden non-regression test (orientation/bbox/checksum) for PWMB geometry outputs.
+- Update remaining-task tracker and lot documentation.
+
+Tests: PYTHONPATH=. pytest -q (112 passed)
+Docs: RESTE_A_FAIRE.md, docs/52_LOT_J_VIEWER_RELIABILITY_AND_QA.md
+```

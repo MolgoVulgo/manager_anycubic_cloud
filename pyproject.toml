@@ -26,7 +26,7 @@ dev = [
 manager-anycubic-cloud = "app_gui_qt.app:main"
 
 [tool.setuptools.packages.find]
-include = ["accloud_core*", "pwmb_core*", "render3d_core*", "app_gui_qt*", "tests*"]
+include = ["accloud_core*", "pwmb_core*", "pwmb_geom*", "render3d_core*", "app_gui_qt*", "tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

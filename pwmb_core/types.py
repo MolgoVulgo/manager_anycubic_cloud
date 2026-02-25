@@ -44,6 +44,7 @@ class PwmbDocument:
     table_addresses: list[int] = field(default_factory=list)
     lut: list[int] = field(default_factory=list)
     pws_convention: str | None = None
+    pw0_variant: str | None = None
 
     @property
     def width(self) -> int:

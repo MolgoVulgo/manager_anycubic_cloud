@@ -10,14 +10,28 @@ from urllib.parse import parse_qsl, urlparse
 from pathlib import Path
 from typing import Any
 
+from accloud_core.logging_contract import emit_event, get_op_id
 from accloud_core.models import SessionData
 
-LOGGER = logging.getLogger("accloud_core.session")
+LOGGER = logging.getLogger("accloud.session")
 
 
 def load_session(path: Path) -> SessionData:
-    with path.open("r", encoding="utf-8") as handle:
-        raw = json.load(handle)
+    op_id = get_op_id()
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception as exc:
+        emit_event(
+            LOGGER,
+            logging.ERROR,
+            event="session.load_fail",
+            msg="Session load failed",
+            component="accloud.session",
+            op_id=op_id,
+            error={"type": type(exc).__name__, "message": str(exc)},
+        )
+        raise
 
     if not isinstance(raw, dict):
         return SessionData()
@@ -35,10 +49,21 @@ def load_session(path: Path) -> SessionData:
         if value and key not in raw_tokens:
             raw_tokens[key] = value
 
-    return SessionData(tokens=_normalize_tokens_for_runtime(raw_tokens))
+    session = SessionData(tokens=_normalize_tokens_for_runtime(raw_tokens))
+    emit_event(
+        LOGGER,
+        logging.INFO,
+        event="session.load_ok",
+        msg="Session loaded",
+        component="accloud.session",
+        op_id=op_id,
+        data={"token_count": len(session.tokens)},
+    )
+    return session
 
 
 def save_session(path: Path, session: SessionData) -> None:
+    op_id = get_op_id()
     path.parent.mkdir(parents=True, exist_ok=True)
     normalized_tokens = _normalize_tokens_for_storage(session.tokens)
     payload = {
@@ -49,6 +74,15 @@ def save_session(path: Path, session: SessionData) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=True, indent=2, sort_keys=True)
+    emit_event(
+        LOGGER,
+        logging.INFO,
+        event="session.save_ok",
+        msg="Session saved",
+        component="accloud.session",
+        op_id=op_id,
+        data={"token_count": len(normalized_tokens)},
+    )
 
 
 def extract_session_from_har(har_path: Path, host_contains: str | None = "anycubic") -> SessionData:

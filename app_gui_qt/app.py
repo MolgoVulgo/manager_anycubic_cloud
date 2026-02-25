@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import atexit
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 import faulthandler
 import json
 import logging
-from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 import sys
 import threading
@@ -14,6 +14,12 @@ from accloud_core.api import AnycubicCloudApi
 from accloud_core.cache_store import CacheStore
 from accloud_core.client import CloudHttpClient
 from accloud_core.config import AppConfig
+from accloud_core.logging_contract import (
+    build_queue_listener,
+    emit_event,
+    get_op_id,
+    operation_context,
+)
 from accloud_core.models import FileItem, Printer, Quota, SessionData
 from accloud_core.session_store import extract_tokens_from_har, load_session, merge_sessions, save_session
 from app_gui_qt.dialogs.print_dialog import build_print_dialog
@@ -27,47 +33,54 @@ from app_gui_qt.tabs.printer_tab import build_printer_tab
 from app_gui_qt.theme import Theme
 
 
+_LOG_LISTENER = None
+_LOG_LISTENER_REGISTERED = False
+
+
+def _stop_log_listener() -> None:
+    global _LOG_LISTENER
+    if _LOG_LISTENER is None:
+        return
+    _LOG_LISTENER.stop()
+    _LOG_LISTENER = None
+
+
 def _configure_logging(config: AppConfig) -> None:
+    global _LOG_LISTENER, _LOG_LISTENER_REGISTERED
     root_logger = logging.getLogger()
-    level = getattr(logging, config.log_level, logging.INFO)
-    root_logger.setLevel(level)
+    app_level = getattr(logging, config.log_level, logging.INFO)
+    http_level = getattr(logging, config.http_log_level, logging.INFO)
+    root_logger.setLevel(min(app_level, http_level))
 
     for handler in list(root_logger.handlers):
         root_logger.removeHandler(handler)
         handler.close()
 
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    config.http_log_path.parent.mkdir(parents=True, exist_ok=True)
-    app_file_handler = TimedRotatingFileHandler(
-        filename=str(config.http_log_path),
-        when="midnight",
-        interval=1,
-        backupCount=config.http_log_retention_days,
-        encoding="utf-8",
+    _stop_log_listener()
+    queue_handler, listener = build_queue_listener(
+        app_log_path=config.app_log_path,
+        http_log_path=config.http_log_path,
+        render3d_log_path=config.render3d_log_path,
+        app_level=app_level,
+        http_level=http_level,
+        max_bytes=config.log_max_bytes,
+        backups=config.log_backups,
+        compress=config.log_compress,
+        compress_level=config.log_compress_level,
     )
-    app_file_handler.setLevel(logging.DEBUG)
-    app_file_handler.setFormatter(formatter)
-    root_logger.addHandler(app_file_handler)
+    root_logger.addHandler(queue_handler)
+    listener.start()
+    _LOG_LISTENER = listener
+    if not _LOG_LISTENER_REGISTERED:
+        atexit.register(_stop_log_listener)
+        _LOG_LISTENER_REGISTERED = True
 
-    config.fault_log_path.parent.mkdir(parents=True, exist_ok=True)
-    fault_file_handler = TimedRotatingFileHandler(
-        filename=str(config.fault_log_path),
-        when="midnight",
-        interval=1,
-        backupCount=config.http_log_retention_days,
-        encoding="utf-8",
-    )
-    fault_file_handler.setLevel(logging.ERROR)
-    fault_file_handler.setFormatter(formatter)
-    root_logger.addHandler(fault_file_handler)
-
-    http_logger = logging.getLogger("accloud_core.http")
-    http_logger.setLevel(logging.DEBUG)
-    # accloud_core.http records now flow through root handlers to keep a single consolidated log file.
-    for handler in list(http_logger.handlers):
-        http_logger.removeHandler(handler)
-        handler.close()
+    http_logger = logging.getLogger("accloud.http")
+    http_logger.setLevel(http_level)
     http_logger.propagate = True
+    legacy_http_logger = logging.getLogger("accloud_core.http")
+    legacy_http_logger.setLevel(http_level)
+    legacy_http_logger.propagate = True
 
 
 def _install_global_exception_hooks(logger: logging.Logger) -> None:
@@ -133,9 +146,106 @@ def _open_print_dialog(owner) -> None:
     dialog.exec()
 
 
-def _open_viewer_dialog(owner) -> None:
-    dialog = build_pwmb3d_dialog(owner)
+def _open_viewer_dialog(
+    owner,
+    *,
+    pwmb_path: Path | None = None,
+    file_label: str | None = None,
+    resolve_pwmb_path=None,
+) -> None:
+    dialog = build_pwmb3d_dialog(
+        owner,
+        pwmb_path=pwmb_path,
+        file_label=file_label,
+        resolve_pwmb_path=resolve_pwmb_path,
+    )
     dialog.exec()
+
+
+def _sanitize_filename(value: str, *, default: str = "model.pwmb") -> str:
+    text = value.strip()
+    if not text:
+        return default
+    allowed = []
+    for char in text:
+        if char.isalnum() or char in {".", "_", "-"}:
+            allowed.append(char)
+        else:
+            allowed.append("_")
+    candidate = "".join(allowed).strip("._")
+    if not candidate:
+        candidate = default
+    if not candidate.lower().endswith(".pwmb"):
+        candidate = f"{candidate}.pwmb"
+    return candidate
+
+
+def _resolve_pwmb_path_for_viewer(
+    *,
+    file_item: FileItem,
+    api: AnycubicCloudApi,
+    config: AppConfig,
+    logger: logging.Logger,
+) -> Path | None:
+    file_id = str(file_item.file_id).strip()
+    if not file_id:
+        return None
+
+    file_name = _sanitize_filename(file_item.name or file_id)
+    cache_dir = config.cache_dir / "viewer_pwmb"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / f"{file_id}_{file_name}"
+    if target.exists() and target.stat().st_size > 0:
+        return target
+
+    try:
+        api.download_file(file_id, str(target))
+    except Exception as exc:
+        try:
+            if target.exists():
+                target.unlink()
+        except OSError:
+            pass
+        logger.warning(
+            "PWMB viewer cache download failed file_id=%s name=%s error=%s",
+            file_id,
+            file_item.name,
+            exc,
+        )
+        return None
+    if target.exists() and target.stat().st_size > 0:
+        return target
+    return None
+
+
+def _make_open_viewer_callback(
+    *,
+    owner,
+    api: AnycubicCloudApi,
+    config: AppConfig,
+    logger: logging.Logger,
+):
+    def _open(file_item: FileItem | None = None) -> None:
+        pwmb_path: Path | None = None
+        resolve_pwmb_path = None
+        file_label: str | None = None
+        if isinstance(file_item, FileItem):
+            file_label = file_item.name or file_item.file_id
+            if (file_item.name or "").lower().endswith(".pwmb"):
+                resolve_pwmb_path = lambda: _resolve_pwmb_path_for_viewer(
+                    file_item=file_item,
+                    api=api,
+                    config=config,
+                    logger=logger,
+                )
+        _open_viewer_dialog(
+            owner,
+            pwmb_path=pwmb_path,
+            file_label=file_label,
+            resolve_pwmb_path=resolve_pwmb_path,
+        )
+
+    return _open
 
 
 def _make_session_import_callback(
@@ -145,61 +255,89 @@ def _make_session_import_callback(
     logger: logging.Logger,
 ) -> ImportHarCallback:
     def _import_har(har_path: Path, session_path: Path) -> tuple[bool, str]:
-        try:
-            incoming = extract_tokens_from_har(har_path)
-            logger.debug(
-                "HAR parsed token_count=%s token_keys=%s",
-                len(incoming.tokens),
-                sorted(incoming.tokens.keys()),
+        with operation_context() as op_id:
+            emit_event(
+                logger,
+                logging.INFO,
+                event="ui.action",
+                msg="Session HAR import requested",
+                component="app.gui",
+                op_id=op_id,
+                data={"action": "session.import_har", "har_file": har_path.name},
             )
-            if not incoming.tokens:
-                return False, "No token found in HAR file for Anycubic endpoints."
-            current = client.session_data
-            merged = merge_sessions(current, incoming)
-            if not str(merged.tokens.get("token", "")).strip():
-                bootstrap_access_token = (
-                    str(merged.tokens.get("access_token", "")).strip()
-                    or str(merged.tokens.get("id_token", "")).strip()
+            try:
+                incoming = extract_tokens_from_har(har_path)
+                logger.debug(
+                    "HAR parsed token_count=%s token_keys=%s",
+                    len(incoming.tokens),
+                    sorted(incoming.tokens.keys()),
                 )
-                if bootstrap_access_token:
-                    try:
-                        login_data = api.login_with_access_token(bootstrap_access_token)
-                        session_token = str(login_data.get("token", "")).strip()
-                        if session_token:
-                            merged.tokens["token"] = session_token
-                            logger.debug("Session token bootstrapped via loginWithAccessToken.")
-                    except Exception as exc:
-                        logger.warning("Session token bootstrap failed: %s", exc)
-            logger.debug(
-                "Writing imported session path=%s token_count=%s token_keys=%s",
-                session_path,
-                len(merged.tokens),
-                sorted(merged.tokens.keys()),
-            )
-            save_session(session_path, merged)
-            client.update_session(merged)
-
-            valid, validation_msg = _validate_connection(api=api, logger=logger)
-            if not valid:
-                # Debug mode: keep imported token in-memory and on disk even if validation fails.
-                logger.warning(
-                    "Session validation failed after HAR import, keeping imported token for debug "
-                    "path=%s token_count=%s error=%s",
+                if not incoming.tokens:
+                    return False, "No token found in HAR file for Anycubic endpoints."
+                current = client.session_data
+                merged = merge_sessions(current, incoming)
+                if not str(merged.tokens.get("token", "")).strip():
+                    bootstrap_access_token = (
+                        str(merged.tokens.get("access_token", "")).strip()
+                        or str(merged.tokens.get("id_token", "")).strip()
+                    )
+                    if bootstrap_access_token:
+                        try:
+                            login_data = api.login_with_access_token(bootstrap_access_token, op_id=op_id)
+                            session_token = str(login_data.get("token", "")).strip()
+                            if session_token:
+                                merged.tokens["token"] = session_token
+                                logger.debug("Session token bootstrapped via loginWithAccessToken.")
+                        except Exception as exc:
+                            logger.warning("Session token bootstrap failed: %s", exc)
+                logger.debug(
+                    "Writing imported session path=%s token_count=%s token_keys=%s",
                     session_path,
                     len(merged.tokens),
-                    validation_msg,
+                    sorted(merged.tokens.keys()),
                 )
-                return (
-                    False,
-                    "HAR import completed but token validation failed "
-                    f"(token kept for debug): {validation_msg}",
-                )
+                save_session(session_path, merged)
+                client.update_session(merged)
 
-            logger.info("Session token import valid tokens=%s", len(merged.tokens))
-            return True, f"Session imported and validated from {har_path.name}"
-        except Exception as exc:  # pragma: no cover - runtime safety path
-            logger.exception("HAR import failed: %s", exc)
-            return False, f"HAR import failed: {exc}"
+                valid, validation_msg = _validate_connection(api=api, logger=logger)
+                if not valid:
+                    # Debug mode: keep imported token in-memory and on disk even if validation fails.
+                    logger.warning(
+                        "Session validation failed after HAR import, keeping imported token for debug "
+                        "path=%s token_count=%s error=%s",
+                        session_path,
+                        len(merged.tokens),
+                        validation_msg,
+                    )
+                    return (
+                        False,
+                        "HAR import completed but token validation failed "
+                        f"(token kept for debug): {validation_msg}",
+                    )
+
+                emit_event(
+                    logger,
+                    logging.INFO,
+                    event="auth.har_import_ok",
+                    msg="HAR import completed",
+                    component="accloud.auth",
+                    op_id=op_id,
+                    data={"token_count": len(merged.tokens)},
+                )
+                logger.info("Session token import valid tokens=%s", len(merged.tokens))
+                return True, f"Session imported and validated from {har_path.name}"
+            except Exception as exc:  # pragma: no cover - runtime safety path
+                emit_event(
+                    logger,
+                    logging.ERROR,
+                    event="auth.har_import_fail",
+                    msg="HAR import failed",
+                    component="accloud.auth",
+                    op_id=op_id,
+                    error={"type": type(exc).__name__, "message": str(exc)},
+                )
+                logger.exception("HAR import failed: %s", exc)
+                return False, f"HAR import failed: {exc}"
 
     return _import_har
 
@@ -243,50 +381,60 @@ def _make_refresh_files_callback(
     cache_store: CacheStore,
 ):
     def _refresh() -> tuple[Quota | None, list[FileItem], str | None]:
-        errors: list[str] = []
-        quota: Quota | None = None
-        files: list[FileItem] = []
+        with operation_context() as op_id:
+            emit_event(
+                logger,
+                logging.INFO,
+                event="ui.action",
+                msg="Files refresh requested",
+                component="app.gui",
+                op_id=op_id,
+                data={"action": "files.refresh"},
+            )
+            errors: list[str] = []
+            quota: Quota | None = None
+            files: list[FileItem] = []
 
-        try:
-            quota = api.get_quota()
-        except Exception as exc:
-            logger.warning("Quota refresh failed: %s", exc)
-            errors.append(f"quota: {exc}")
+            try:
+                quota = api.get_quota(op_id=op_id)
+            except Exception as exc:
+                logger.warning("Quota refresh failed: %s", exc)
+                errors.append(f"quota: {exc}")
 
-        try:
-            files = api.list_files(page=1, page_size=20)
-        except Exception as exc:
-            logger.warning("Files refresh failed: %s", exc)
-            errors.append(f"files: {exc}")
+            try:
+                files = api.list_files(page=1, page_size=20, op_id=op_id)
+            except Exception as exc:
+                logger.warning("Files refresh failed: %s", exc)
+                errors.append(f"files: {exc}")
 
-        _enrich_files_with_gcode(
-            files=files,
-            api=api,
-            logger=logger,
-            config=config,
-            cache_store=cache_store,
-        )
+            _enrich_files_with_gcode(
+                files=files,
+                api=api,
+                logger=logger,
+                config=config,
+                cache_store=cache_store,
+            )
 
-        if quota is not None or files:
-            _save_startup_snapshot(cache_store=cache_store, quota=quota, files=files)
+            if quota is not None or files:
+                _save_startup_snapshot(cache_store=cache_store, quota=quota, files=files)
 
-        if errors and quota is None and not files:
-            cached_quota, cached_files = _load_startup_snapshot(cache_store=cache_store, config=config)
-            if cached_quota is not None or cached_files:
-                return (
-                    cached_quota,
-                    cached_files,
-                    "Cloud unavailable, loaded from local cache.",
-                )
+            if errors and quota is None and not files:
+                cached_quota, cached_files = _load_startup_snapshot(cache_store=cache_store, config=config)
+                if cached_quota is not None or cached_files:
+                    return (
+                        cached_quota,
+                        cached_files,
+                        "Cloud unavailable, loaded from local cache.",
+                    )
 
-        if errors:
-            cached_quota, cached_files = _load_startup_snapshot(cache_store=cache_store, config=config)
-            if quota is None and cached_quota is not None:
-                quota = cached_quota
-            if not files and cached_files:
-                files = cached_files
-            return quota, files, "Refresh partial failure: " + " | ".join(errors)
-        return quota, files, None
+            if errors:
+                cached_quota, cached_files = _load_startup_snapshot(cache_store=cache_store, config=config)
+                if quota is None and cached_quota is not None:
+                    quota = cached_quota
+                if not files and cached_files:
+                    files = cached_files
+                return quota, files, "Refresh partial failure: " + " | ".join(errors)
+            return quota, files, None
 
     return _refresh
 
@@ -299,24 +447,34 @@ def _make_refresh_printers_callback(
     cache_store: CacheStore,
 ):
     def _refresh() -> tuple[list[Printer], str | None]:
-        try:
-            printers = api.list_printers()
-        except Exception as exc:
-            logger.warning("Printers refresh failed: %s", exc)
-            cached_printers = _load_printer_snapshot(cache_store=cache_store, config=config)
-            if cached_printers:
-                return cached_printers, "Cloud unavailable, loaded printers from local cache."
-            return [], f"Printers refresh failed: {exc}"
+        with operation_context() as op_id:
+            emit_event(
+                logger,
+                logging.INFO,
+                event="ui.action",
+                msg="Printers refresh requested",
+                component="app.gui",
+                op_id=op_id,
+                data={"action": "printers.refresh"},
+            )
+            try:
+                printers = api.list_printers(op_id=op_id)
+            except Exception as exc:
+                logger.warning("Printers refresh failed: %s", exc)
+                cached_printers = _load_printer_snapshot(cache_store=cache_store, config=config)
+                if cached_printers:
+                    return cached_printers, "Cloud unavailable, loaded printers from local cache."
+                return [], f"Printers refresh failed: {exc}"
 
-        _enrich_printers_with_active_projects(
-            printers=printers,
-            api=api,
-            logger=logger,
-        )
-        _save_printer_snapshot(cache_store=cache_store, printers=printers)
-        if printers:
-            return printers, None
-        return printers, "No printer returned by cloud API."
+            _enrich_printers_with_active_projects(
+                printers=printers,
+                api=api,
+                logger=logger,
+            )
+            _save_printer_snapshot(cache_store=cache_store, printers=printers)
+            if printers:
+                return printers, None
+            return printers, "No printer returned by cloud API."
 
     return _refresh
 
@@ -336,6 +494,7 @@ def _enrich_printers_with_active_projects(
         return
 
     workers = max(1, min(4, len(candidates)))
+    op_id = get_op_id()
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="printer-projects") as pool:
         futures = {
             pool.submit(
@@ -344,6 +503,7 @@ def _enrich_printers_with_active_projects(
                 print_status=1,
                 page=1,
                 limit=1,
+                op_id=op_id,
             ): printer
             for printer in candidates
         }
@@ -367,6 +527,7 @@ def _enrich_printers_with_active_projects(
                         print_status=None,
                         page=1,
                         limit=5,
+                        op_id=op_id,
                     )
                 except Exception as exc:
                     logger.debug(
@@ -595,79 +756,119 @@ def _pick_map_value(mapping: dict[str, object], *keys: str, default: object = No
 
 def _make_download_file_callback(*, api: AnycubicCloudApi, logger: logging.Logger):
     def _download(file_item: FileItem, destination: str) -> None:
-        file_id = str(file_item.file_id).strip()
-        if not file_id:
-            raise ValueError("Cannot download file without file_id.")
-        logger.info(
-            "Cloud download requested file_id=%s destination=%s",
-            file_id,
-            destination,
-        )
-        api.download_file(file_id, destination)
+        with operation_context() as op_id:
+            file_id = str(file_item.file_id).strip()
+            if not file_id:
+                raise ValueError("Cannot download file without file_id.")
+            emit_event(
+                logger,
+                logging.INFO,
+                event="ui.action",
+                msg="Download file requested",
+                component="app.gui",
+                op_id=op_id,
+                data={"action": "files.download", "file_id": file_id},
+            )
+            logger.info(
+                "Cloud download requested file_id=%s destination=%s",
+                file_id,
+                destination,
+            )
+            api.download_file(file_id, destination, op_id=op_id)
 
     return _download
 
 
 def _make_delete_file_callback(*, api: AnycubicCloudApi, logger: logging.Logger):
     def _delete(file_item: FileItem) -> None:
-        file_id = str(file_item.file_id).strip()
-        if not file_id:
-            raise ValueError("Cannot delete file without file_id.")
-        logger.info(
-            "Cloud delete requested file_id=%s file_name=%s",
-            file_id,
-            file_item.name,
-        )
-        api.delete_file(file_id)
-        logger.info(
-            "Cloud delete completed file_id=%s",
-            file_id,
-        )
+        with operation_context() as op_id:
+            file_id = str(file_item.file_id).strip()
+            if not file_id:
+                raise ValueError("Cannot delete file without file_id.")
+            emit_event(
+                logger,
+                logging.INFO,
+                event="ui.action",
+                msg="Delete file requested",
+                component="app.gui",
+                op_id=op_id,
+                data={"action": "files.delete", "file_id": file_id},
+            )
+            logger.info(
+                "Cloud delete requested file_id=%s file_name=%s",
+                file_id,
+                file_item.name,
+            )
+            api.delete_file(file_id, op_id=op_id)
+            logger.info(
+                "Cloud delete completed file_id=%s",
+                file_id,
+            )
 
     return _delete
 
 
 def _make_upload_file_callback(*, api: AnycubicCloudApi, logger: logging.Logger):
     def _upload(source_path: str) -> str:
-        source = Path(source_path).expanduser()
-        logger.info(
-            "Cloud upload requested source=%s",
-            source,
-        )
-        file_id = api.upload_file(str(source))
-        logger.info(
-            "Cloud upload completed source=%s file_id=%s",
-            source,
-            file_id,
-        )
-        return file_id
+        with operation_context() as op_id:
+            source = Path(source_path).expanduser()
+            emit_event(
+                logger,
+                logging.INFO,
+                event="ui.action",
+                msg="Upload file requested",
+                component="app.gui",
+                op_id=op_id,
+                data={"action": "files.upload", "file_name": source.name},
+            )
+            logger.info(
+                "Cloud upload requested source=%s",
+                source,
+            )
+            file_id = api.upload_file(str(source), op_id=op_id)
+            logger.info(
+                "Cloud upload completed source=%s file_id=%s",
+                source,
+                file_id,
+            )
+            return file_id
 
     return _upload
 
 
 def _make_print_file_callback(*, api: AnycubicCloudApi, logger: logging.Logger):
     def _print(file_item: FileItem, printer: Printer) -> None:
-        file_id = str(file_item.file_id).strip()
-        if not file_id:
-            raise ValueError("Cannot send print order without file_id.")
+        with operation_context() as op_id:
+            file_id = str(file_item.file_id).strip()
+            if not file_id:
+                raise ValueError("Cannot send print order without file_id.")
 
-        printer_id = str(printer.printer_id).strip()
-        if not printer_id:
-            raise ValueError("Cannot send print order without printer_id.")
+            printer_id = str(printer.printer_id).strip()
+            if not printer_id:
+                raise ValueError("Cannot send print order without printer_id.")
 
-        logger.info(
-            "Cloud print requested file_id=%s printer_id=%s printer_name=%s file_name=%s",
-            file_id,
-            printer_id,
-            printer.name,
-            file_item.name,
-        )
-        api.send_print_order(file_id, printer_id)
-        logger.info(
-            "Cloud print order sent file_id=%s printer_id=%s",
-            file_id,
-            printer_id,
-        )
+            emit_event(
+                logger,
+                logging.INFO,
+                event="ui.action",
+                msg="Print order requested",
+                component="app.gui",
+                op_id=op_id,
+                data={"action": "files.print", "file_id": file_id, "printer_id": printer_id},
+            )
+            logger.info(
+                "Cloud print requested file_id=%s printer_id=%s printer_name=%s file_name=%s",
+                file_id,
+                printer_id,
+                printer.name,
+                file_item.name,
+            )
+            api.send_print_order(file_id, printer_id, op_id=op_id)
+            logger.info(
+                "Cloud print order sent file_id=%s printer_id=%s",
+                file_id,
+                printer_id,
+            )
 
     return _print
 
@@ -727,10 +928,11 @@ def _enrich_files_with_gcode(
     # Log analysis shows this endpoint dominated startup latency. Limit and parallelize calls.
     candidates = missing
     workers = max(1, min(4, len(candidates)))
+    op_id = get_op_id()
 
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="gcode-info") as pool:
         futures = {
-            pool.submit(api.get_gcode_info, lookup_id): (file_item, lookup_id)
+            pool.submit(api.get_gcode_info, lookup_id, op_id=op_id): (file_item, lookup_id)
             for file_item, lookup_id in candidates
         }
         for future in as_completed(futures):
@@ -1159,6 +1361,12 @@ def build_main_window(
     window.setWindowTitle("Anycubic Cloud Client + PWMB Viewer (Phase 3 - Cloud)")
     window.resize(1320, 860)
     window.setMinimumSize(760, 420)
+    open_viewer_cb = _make_open_viewer_callback(
+        owner=window,
+        api=api,
+        config=config,
+        logger=logger,
+    )
 
     root = qtwidgets.QWidget(window)
     root_layout = qtwidgets.QVBoxLayout(root)
@@ -1191,7 +1399,7 @@ def build_main_window(
     print_btn.clicked.connect(lambda: _open_print_dialog(window))
 
     view_btn = qtwidgets.QPushButton("3D Viewer Dialog")
-    view_btn.clicked.connect(lambda: _open_viewer_dialog(window))
+    view_btn.clicked.connect(lambda: open_viewer_cb())
 
     session_btn = qtwidgets.QPushButton("Session Settings")
     session_btn.clicked.connect(
@@ -1210,7 +1418,7 @@ def build_main_window(
     tabs = qtwidgets.QTabWidget(root)
     files_widget = build_files_tab(
         window,
-        on_open_viewer=lambda: _open_viewer_dialog(window),
+        on_open_viewer=open_viewer_cb,
         on_upload=upload_cb,
         on_download=download_cb,
         on_delete=delete_cb,
@@ -1233,7 +1441,16 @@ def build_main_window(
         auto_refresh_interval_ms=30_000,
     )
     tabs.addTab(printer_widget, "Printer")
-    tabs.addTab(build_log_tab(window, log_path=config.http_log_path), "Log")
+    tabs.addTab(
+        build_log_tab(
+            window,
+            app_log_path=config.app_log_path,
+            http_log_path=config.http_log_path,
+            fault_log_path=config.fault_log_path,
+            render3d_log_path=config.render3d_log_path,
+        ),
+        "Log",
+    )
     root_layout.addWidget(tabs, 1)
 
     window._files_tab_controller = getattr(files_widget, "_files_tab_controller", None)  # type: ignore[attr-defined]

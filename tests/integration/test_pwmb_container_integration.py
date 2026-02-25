@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import struct
 from pathlib import Path
 
-from pwmb_core.container import decode_layer, read_pwmb_document
+from pwmb_core.container import decode_layer, decode_layer_index_mask, open_layer_blob_reader, read_pwmb_document
 from pwmb_core.export import export_layers_to_png
 
 
@@ -17,7 +18,13 @@ def _align4(value: int) -> int:
     return (value + 3) & ~3
 
 
-def _build_synthetic_pwmb(path: Path) -> None:
+def _build_synthetic_pwmb(
+    path: Path,
+    *,
+    layer_blob: bytes | None = None,
+    non_zero_pixels: int = 3,
+    lut_values: list[int] | None = None,
+) -> None:
     table_count = 8
 
     header_payload = bytearray(52)
@@ -39,10 +46,12 @@ def _build_synthetic_pwmb(path: Path) -> None:
     struct.pack_into("<I", layerdef_payload, 0, 1)  # layer count
     struct.pack_into("<f", layerdef_payload, 4 + 8, 2.5)
     struct.pack_into("<f", layerdef_payload, 4 + 20, 0.05)
-    struct.pack_into("<I", layerdef_payload, 4 + 24, 3)
+    struct.pack_into("<I", layerdef_payload, 4 + 24, int(non_zero_pixels))
 
-    lut_payload = struct.pack("<II", 1, 16) + bytes([0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238, 255]) + struct.pack("<I", 0)
-    layer_blob = bytes.fromhex("00011003")
+    lut = lut_values or [0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238, 255]
+    lut_payload = struct.pack("<II", 1, 16) + bytes(lut[:16]) + struct.pack("<I", 0)
+    if layer_blob is None:
+        layer_blob = bytes.fromhex("00011003")
 
     tables = [
         _framed_table("HEADER", bytes(header_payload)),
@@ -102,3 +111,54 @@ def test_read_decode_and_export_synthetic_pwmb(tmp_path: Path) -> None:
     assert exported.exists()
     payload = exported.read_bytes()
     assert payload.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_decode_layer_pw0_byte_token_variant_fallback(tmp_path: Path) -> None:
+    sample = tmp_path / "synthetic_byte_token.pwmb"
+    # word16 decode fails strict completeness on this odd-size payload;
+    # adaptive fallback must recover with byte_token decoding.
+    _build_synthetic_pwmb(sample, layer_blob=bytes([0x00, 0x01, 0x13]), non_zero_pixels=3)
+
+    document = read_pwmb_document(sample)
+    decoded = decode_layer(document, 0, strict=True)
+    assert decoded == [0, 17, 17, 17]
+    assert document.pw0_variant == "byte_token"
+
+
+def test_decode_layer_supports_persistent_reader(tmp_path: Path) -> None:
+    sample = tmp_path / "synthetic_reader.pwmb"
+    _build_synthetic_pwmb(sample)
+    document = read_pwmb_document(sample)
+
+    with open_layer_blob_reader(document) as reader:
+        decoded = decode_layer(document, 0, strict=True, reader=reader)
+        decoded_threshold = decode_layer(document, 0, strict=True, threshold=1, reader=reader)
+
+    assert decoded == [0, 17, 17, 17]
+    assert decoded_threshold == [0, 255, 255, 255]
+
+
+def test_decode_layer_index_mask_is_based_on_color_index_not_lut_intensity(tmp_path: Path) -> None:
+    sample = tmp_path / "synthetic_index_mask.pwmb"
+    lut = [0] * 16
+    _build_synthetic_pwmb(sample, lut_values=lut)
+    document = read_pwmb_document(sample)
+
+    decoded_intensity = decode_layer(document, 0, strict=True)
+    decoded_mask = decode_layer_index_mask(document, 0, strict=True)
+
+    assert decoded_intensity == [0, 0, 0, 0]
+    assert decoded_mask == [0, 255, 255, 255]
+
+
+def test_decode_layer_shared_reader_is_stable_in_threads(tmp_path: Path) -> None:
+    sample = tmp_path / "synthetic_threads.pwmb"
+    _build_synthetic_pwmb(sample)
+    document = read_pwmb_document(sample)
+
+    with open_layer_blob_reader(document) as reader:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(lambda _idx: decode_layer(document, 0, strict=True, reader=reader), range(24)))
+
+    assert len(results) == 24
+    assert all(item == [0, 17, 17, 17] for item in results)

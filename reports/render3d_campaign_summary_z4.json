@@ -1,0 +1,150 @@
+{
+  "protocol": {
+    "scope_files": [
+      "cube.pwmb",
+      "raven_skull-12-25-v3.pwmb",
+      "raven_skull_19_12.pwmb"
+    ],
+    "z_stride": 4,
+    "xy_stride": 4,
+    "bin_mode": "index_strict",
+    "threshold": 1
+  },
+  "aggregate": {
+    "python": {
+      "decode_ms_total": 12860.422999999999,
+      "contours_ms_total": 39821.191000000006,
+      "triangulation_ms_total": 40004.858,
+      "total_ms": 92686.47200000001,
+      "loops_total": 122479,
+      "triangles_total": 2353404,
+      "vertices_total": 17390514,
+      "layers_total": 406,
+      "layers_built": 405,
+      "layers_skipped": 1
+    },
+    "cpp_native": {
+      "decode_ms_total": 12824.472,
+      "contours_ms_total": 5019.381,
+      "triangulation_ms_total": 38644.202000000005,
+      "total_ms": 56488.055,
+      "loops_total": 122479,
+      "triangles_total": 2353404,
+      "vertices_total": 17390514,
+      "layers_total": 406,
+      "layers_built": 405,
+      "layers_skipped": 1
+    },
+    "cpp_opencv": {
+      "decode_ms_total": 12850.08,
+      "contours_ms_total": 5189.312,
+      "triangulation_ms_total": 45536.105,
+      "total_ms": 63575.497,
+      "loops_total": 121716,
+      "triangles_total": 2359440,
+      "vertices_total": 17408622,
+      "layers_total": 406,
+      "layers_built": 405,
+      "layers_skipped": 1
+    }
+  },
+  "speedups": {
+    "cpp_native_vs_python_total_x": 1.6408154254912832,
+    "cpp_opencv_vs_python_total_x": 1.4578961451138952,
+    "cpp_native_vs_opencv_total_x": 1.1254679772564307,
+    "cpp_native_vs_opencv_contours_x": 1.0338549713600143,
+    "cpp_native_vs_opencv_triangulation_x": 1.1783424845983363
+  },
+  "per_file": [
+    {
+      "file": "cube.pwmb",
+      "python_total_ms": 774.4229999999999,
+      "cpp_native_total_ms": 405.201,
+      "cpp_opencv_total_ms": 452.512,
+      "native_vs_python": {
+        "contour_area_delta_mm2": 0.0,
+        "mesh_area_delta_mm2": 0.0,
+        "contour_bbox_delta_max": 0.0,
+        "mesh_bbox_delta_max": 0.0,
+        "triangle_count_delta": 0
+      },
+      "opencv_vs_python": {
+        "contour_area_delta_mm2": 0.0,
+        "mesh_area_delta_mm2": 0.0,
+        "contour_bbox_delta_max": 0.0,
+        "mesh_bbox_delta_max": 0.0,
+        "triangle_count_delta": 0
+      },
+      "opencv_vs_native": {
+        "contour_area_delta_mm2": 0.0,
+        "mesh_area_delta_mm2": 0.0,
+        "triangle_count_delta": 0,
+        "loops_total_delta": 0,
+        "triangulation_ms_delta": 0.031000000000000028,
+        "contours_ms_delta": 36.27499999999999,
+        "decode_ms_delta": 11.004999999999995,
+        "total_ms_delta": 47.31099999999998
+      }
+    },
+    {
+      "file": "raven_skull-12-25-v3.pwmb",
+      "python_total_ms": 40102.174,
+      "cpp_native_total_ms": 23412.373,
+      "cpp_opencv_total_ms": 27151.177000000003,
+      "native_vs_python": {
+        "contour_area_delta_mm2": 0.0,
+        "mesh_area_delta_mm2": 0.0,
+        "contour_bbox_delta_max": 0.0,
+        "mesh_bbox_delta_max": 0.0,
+        "triangle_count_delta": 0
+      },
+      "opencv_vs_python": {
+        "contour_area_delta_mm2": 0.0,
+        "mesh_area_delta_mm2": 0.0,
+        "contour_bbox_delta_max": 0.0,
+        "mesh_bbox_delta_max": 0.0,
+        "triangle_count_delta": 1238
+      },
+      "opencv_vs_native": {
+        "contour_area_delta_mm2": 0.0,
+        "mesh_area_delta_mm2": 0.0,
+        "triangle_count_delta": 1238,
+        "loops_total_delta": 672,
+        "triangulation_ms_delta": 3599.304000000002,
+        "contours_ms_delta": 83.46099999999979,
+        "decode_ms_delta": 56.03900000000067,
+        "total_ms_delta": 3738.8040000000037
+      }
+    },
+    {
+      "file": "raven_skull_19_12.pwmb",
+      "python_total_ms": 51809.875,
+      "cpp_native_total_ms": 32670.481,
+      "cpp_opencv_total_ms": 35971.808000000005,
+      "native_vs_python": {
+        "contour_area_delta_mm2": 0.0,
+        "mesh_area_delta_mm2": 0.0,
+        "contour_bbox_delta_max": 0.0,
+        "mesh_bbox_delta_max": 0.0,
+        "triangle_count_delta": 0
+      },
+      "opencv_vs_python": {
+        "contour_area_delta_mm2": 0.0,
+        "mesh_area_delta_mm2": -39.306489000009606,
+        "contour_bbox_delta_max": 0.0,
+        "mesh_bbox_delta_max": 0.0,
+        "triangle_count_delta": 4798
+      },
+      "opencv_vs_native": {
+        "contour_area_delta_mm2": 0.0,
+        "mesh_area_delta_mm2": -39.306489000009606,
+        "triangle_count_delta": 4798,
+        "loops_total_delta": -1435,
+        "triangulation_ms_delta": 3292.5679999999993,
+        "contours_ms_delta": 50.19499999999971,
+        "decode_ms_delta": -41.435999999999694,
+        "total_ms_delta": 3301.327000000005
+      }
+    }
+  ]
+}
