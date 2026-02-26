@@ -8,6 +8,7 @@ from app_gui_qt.dialogs.pwmb3d_dialog import (
     _QUALITY_PRESETS,
     _RENDER_PALETTES,
     _camera_pose_for_orbit,
+    _coerce_pool_workers,
     _pan_center_for_drag,
     _quality_ratio_from_index,
     _select_preview_xy_stride_for_quality,
@@ -104,7 +105,9 @@ def test_perf_metrics_export_log_dicts() -> None:
         decode_ms_total=3.4,
         decode_mb_s=12.3,
         contours_ms_total=5.6,
+        contours_wall_ms=2.8,
         triangulation_ms_total=7.8,
+        triangulation_wall_ms=3.9,
         layers_total=10,
         layers_built=8,
         layers_skipped=2,
@@ -133,6 +136,12 @@ def test_perf_metrics_export_log_dicts() -> None:
     gpu_data = gpu.as_log_data()
     assert build_data["layers_total"] == 10
     assert build_data["pool_kind"] == "threads"
+    assert build_data["contours_wall_ms"] == pytest.approx(2.8, rel=1e-6)
+    assert build_data["triangulation_wall_ms"] == pytest.approx(3.9, rel=1e-6)
+    assert build_data["contour_stage_parallelism"] == pytest.approx(round((3.4 + 5.6) / 2.8, 3), rel=1e-6)
+    assert build_data["triangulation_parallelism"] == pytest.approx(2.0, rel=1e-6)
+    assert build_data["contours_workers_effective"] == 1
+    assert build_data["triangulation_workers_effective"] == 1
     assert gpu_data["vbo_bytes_tri"] == 1000
     assert gpu_data["visible_layers_count"] == 12
     assert gpu_data["msaa_samples"] == 4
@@ -271,6 +280,14 @@ def test_quality_presets_are_100_66_33() -> None:
     assert _quality_ratio_from_index(0) == pytest.approx(1.0, rel=1e-6)
     assert _quality_ratio_from_index(1) == pytest.approx(0.66, rel=1e-6)
     assert _quality_ratio_from_index(2) == pytest.approx(0.33, rel=1e-6)
+
+
+def test_coerce_pool_workers_defaults_to_cpu_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app_gui_qt.dialogs.pwmb3d_dialog.os.cpu_count", lambda: 12)
+    assert _coerce_pool_workers(None) == 12
+    assert _coerce_pool_workers("") == 12
+    assert _coerce_pool_workers("99") == 12
+    assert _coerce_pool_workers("4") == 4
 
 
 def test_sample_layers_by_ratio_keeps_expected_density() -> None:

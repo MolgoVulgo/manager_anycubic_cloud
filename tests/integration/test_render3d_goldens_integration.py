@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from pwmb_core import read_pwmb_document
-from render3d_core.backend import PythonGeometryBackend
+from render3d_core.backend import resolve_geometry_backend
 from render3d_core.invariants import build_invariant_snapshot
 from render3d_core.pipeline import build_geometry_pipeline
 
@@ -31,6 +31,10 @@ def test_cube_pwmb_non_regression_golden_orientation_bbox_checksum() -> None:
 
     params = dict(golden["params"])
     document = read_pwmb_document(sample_path)
+    try:
+        backend = resolve_geometry_backend(preferred="cpp")
+    except RuntimeError as exc:
+        pytest.skip(f"cpp backend unavailable: {exc}")
     result = build_geometry_pipeline(
         document,
         threshold=int(params["threshold"]),
@@ -39,7 +43,7 @@ def test_cube_pwmb_non_regression_golden_orientation_bbox_checksum() -> None:
         z_stride=int(params["z_stride"]),
         include_fill=bool(params["include_fill"]),
         max_xy_stride=1,
-        backend=PythonGeometryBackend(),
+        backend=backend,
         cache=None,
     )
     snapshot = build_invariant_snapshot(result.contour_stack, result.geometry).as_dict()

@@ -32,7 +32,7 @@ def _bbox_delta_max(lhs: Any, rhs: Any) -> float | None:
         return None
 
 
-def _total_ms(result: dict[str, Any]) -> float:
+def _total_cpu_ms(result: dict[str, Any]) -> float:
     metrics = dict(result.get("metrics", {}))
     return (
         float(metrics.get("decode_ms_total", 0.0))
@@ -42,12 +42,31 @@ def _total_ms(result: dict[str, Any]) -> float:
     )
 
 
+def _total_wall_ms(result: dict[str, Any]) -> float:
+    metrics = dict(result.get("metrics", {}))
+    parse_ms = float(metrics.get("parse_ms", 0.0))
+    decode_cpu_ms = float(metrics.get("decode_ms_total", 0.0))
+    contours_cpu_ms = float(metrics.get("contours_ms_total", 0.0))
+    tri_cpu_ms = float(metrics.get("triangulation_ms_total", 0.0))
+    # Backward-safe fallback when wall fields are absent in legacy reports.
+    contours_wall_ms = float(metrics.get("contours_wall_ms", decode_cpu_ms + contours_cpu_ms))
+    triangulation_wall_ms = float(metrics.get("triangulation_wall_ms", tri_cpu_ms))
+    buffers_ms = float(metrics.get("buffers_ms_total", 0.0))
+    return parse_ms + contours_wall_ms + triangulation_wall_ms + buffers_ms
+
+
 def _aggregate(report: dict[str, Any]) -> dict[str, Any]:
     totals = {
+        "parse_ms_total": 0.0,
         "decode_ms_total": 0.0,
         "contours_ms_total": 0.0,
         "triangulation_ms_total": 0.0,
+        "contours_wall_ms_total": 0.0,
+        "triangulation_wall_ms_total": 0.0,
         "buffers_ms_total": 0.0,
+        "total_cpu_ms": 0.0,
+        "total_wall_ms": 0.0,
+        # Backward-compatible alias: total_ms now means total wall-clock latency.
         "total_ms": 0.0,
         "loops_total": 0,
         "triangles_total": 0,
@@ -58,15 +77,25 @@ def _aggregate(report: dict[str, Any]) -> dict[str, Any]:
     }
     for item in report.get("results", []):
         metrics = dict(item.get("metrics", {}))
+        parse_ms = float(metrics.get("parse_ms", 0.0))
         decode_ms = float(metrics.get("decode_ms_total", 0.0))
         contours_ms = float(metrics.get("contours_ms_total", 0.0))
         tri_ms = float(metrics.get("triangulation_ms_total", 0.0))
+        contours_wall_ms = float(metrics.get("contours_wall_ms", decode_ms + contours_ms))
+        triangulation_wall_ms = float(metrics.get("triangulation_wall_ms", tri_ms))
         buffers_ms = float(metrics.get("buffers_ms_total", 0.0))
+        total_cpu = decode_ms + contours_ms + tri_ms + buffers_ms
+        total_wall = parse_ms + contours_wall_ms + triangulation_wall_ms + buffers_ms
+        totals["parse_ms_total"] += parse_ms
         totals["decode_ms_total"] += decode_ms
         totals["contours_ms_total"] += contours_ms
         totals["triangulation_ms_total"] += tri_ms
+        totals["contours_wall_ms_total"] += contours_wall_ms
+        totals["triangulation_wall_ms_total"] += triangulation_wall_ms
         totals["buffers_ms_total"] += buffers_ms
-        totals["total_ms"] += decode_ms + contours_ms + tri_ms + buffers_ms
+        totals["total_cpu_ms"] += total_cpu
+        totals["total_wall_ms"] += total_wall
+        totals["total_ms"] += total_wall
         for key in (
             "loops_total",
             "triangles_total",
@@ -122,9 +151,15 @@ def _build_summary(
         per_file.append(
             {
                 "file": name,
-                "python_total_ms": _total_ms(py_item),
-                "cpp_native_total_ms": _total_ms(native_item),
-                "cpp_opencv_total_ms": _total_ms(opencv_item),
+                "python_total_ms": _total_wall_ms(py_item),
+                "python_total_wall_ms": _total_wall_ms(py_item),
+                "python_total_cpu_ms": _total_cpu_ms(py_item),
+                "cpp_native_total_ms": _total_wall_ms(native_item),
+                "cpp_native_total_wall_ms": _total_wall_ms(native_item),
+                "cpp_native_total_cpu_ms": _total_cpu_ms(native_item),
+                "cpp_opencv_total_ms": _total_wall_ms(opencv_item),
+                "cpp_opencv_total_wall_ms": _total_wall_ms(opencv_item),
+                "cpp_opencv_total_cpu_ms": _total_cpu_ms(opencv_item),
                 "native_vs_python": {
                     "contour_area_delta_mm2": float(native_inv.get("contour_area_mm2", 0.0))
                     - float(py_inv.get("contour_area_mm2", 0.0)),
@@ -168,11 +203,18 @@ def _build_summary(
                     - int(dict(native_item.get("metrics", {})).get("loops_total", 0)),
                     "triangulation_ms_delta": float(dict(opencv_item.get("metrics", {})).get("triangulation_ms_total", 0.0))
                     - float(dict(native_item.get("metrics", {})).get("triangulation_ms_total", 0.0)),
+                    "triangulation_wall_ms_delta": float(dict(opencv_item.get("metrics", {})).get("triangulation_wall_ms", 0.0))
+                    - float(dict(native_item.get("metrics", {})).get("triangulation_wall_ms", 0.0)),
                     "contours_ms_delta": float(dict(opencv_item.get("metrics", {})).get("contours_ms_total", 0.0))
                     - float(dict(native_item.get("metrics", {})).get("contours_ms_total", 0.0)),
+                    "contours_wall_ms_delta": float(dict(opencv_item.get("metrics", {})).get("contours_wall_ms", 0.0))
+                    - float(dict(native_item.get("metrics", {})).get("contours_wall_ms", 0.0)),
                     "decode_ms_delta": float(dict(opencv_item.get("metrics", {})).get("decode_ms_total", 0.0))
                     - float(dict(native_item.get("metrics", {})).get("decode_ms_total", 0.0)),
-                    "total_ms_delta": _total_ms(opencv_item) - _total_ms(native_item),
+                    "total_cpu_ms_delta": _total_cpu_ms(opencv_item) - _total_cpu_ms(native_item),
+                    "total_wall_ms_delta": _total_wall_ms(opencv_item) - _total_wall_ms(native_item),
+                    # Backward-compatible alias: total_ms_delta now means wall-clock delta.
+                    "total_ms_delta": _total_wall_ms(opencv_item) - _total_wall_ms(native_item),
                 },
             }
         )
@@ -189,9 +231,24 @@ def _build_summary(
             "cpp_opencv": agg_opencv,
         },
         "speedups": {
-            "cpp_native_vs_python_total_x": (agg_py["total_ms"] / agg_native["total_ms"]) if agg_native["total_ms"] > 0 else None,
-            "cpp_opencv_vs_python_total_x": (agg_py["total_ms"] / agg_opencv["total_ms"]) if agg_opencv["total_ms"] > 0 else None,
-            "cpp_native_vs_opencv_total_x": (agg_opencv["total_ms"] / agg_native["total_ms"]) if agg_native["total_ms"] > 0 else None,
+            "cpp_native_vs_python_total_x": (agg_py["total_wall_ms"] / agg_native["total_wall_ms"])
+            if agg_native["total_wall_ms"] > 0
+            else None,
+            "cpp_opencv_vs_python_total_x": (agg_py["total_wall_ms"] / agg_opencv["total_wall_ms"])
+            if agg_opencv["total_wall_ms"] > 0
+            else None,
+            "cpp_native_vs_opencv_total_x": (agg_opencv["total_wall_ms"] / agg_native["total_wall_ms"])
+            if agg_native["total_wall_ms"] > 0
+            else None,
+            "cpp_native_vs_python_total_cpu_x": (agg_py["total_cpu_ms"] / agg_native["total_cpu_ms"])
+            if agg_native["total_cpu_ms"] > 0
+            else None,
+            "cpp_opencv_vs_python_total_cpu_x": (agg_py["total_cpu_ms"] / agg_opencv["total_cpu_ms"])
+            if agg_opencv["total_cpu_ms"] > 0
+            else None,
+            "cpp_native_vs_opencv_total_cpu_x": (agg_opencv["total_cpu_ms"] / agg_native["total_cpu_ms"])
+            if agg_native["total_cpu_ms"] > 0
+            else None,
             "cpp_native_vs_opencv_contours_x": (
                 agg_opencv["contours_ms_total"] / agg_native["contours_ms_total"]
             )
@@ -230,9 +287,23 @@ def _write_markdown(path: Path, summary: dict[str, Any]) -> None:
     lines.append(f"- bin_mode: {protocol.get('bin_mode')}")
     lines.append(f"- threshold: {protocol.get('threshold')}")
     lines.append("")
-    lines.append("## Aggregate timings (ms)")
+    lines.append("## Aggregate timings (wall ms)")
     lines.append("")
-    lines.append("| backend | decode | contours | triangulation | buffers | total |")
+    lines.append("| backend | parse | contours_wall | triangulation_wall | buffers | total_wall |")
+    lines.append("|---|---:|---:|---:|---:|---:|")
+    for key in ("python", "cpp_native", "cpp_opencv"):
+        item = dict(agg.get(key, {}))
+        lines.append(
+            f"| {key} | {float(item.get('parse_ms_total', 0.0)):.3f} | "
+            f"{float(item.get('contours_wall_ms_total', 0.0)):.3f} | "
+            f"{float(item.get('triangulation_wall_ms_total', 0.0)):.3f} | "
+            f"{float(item.get('buffers_ms_total', 0.0)):.3f} | "
+            f"{float(item.get('total_wall_ms', 0.0)):.3f} |"
+        )
+    lines.append("")
+    lines.append("## Aggregate timings (cumulative CPU ms)")
+    lines.append("")
+    lines.append("| backend | decode_cpu | contours_cpu | triangulation_cpu | buffers | total_cpu |")
     lines.append("|---|---:|---:|---:|---:|---:|")
     for key in ("python", "cpp_native", "cpp_opencv"):
         item = dict(agg.get(key, {}))
@@ -241,13 +312,28 @@ def _write_markdown(path: Path, summary: dict[str, Any]) -> None:
             f"{float(item.get('contours_ms_total', 0.0)):.3f} | "
             f"{float(item.get('triangulation_ms_total', 0.0)):.3f} | "
             f"{float(item.get('buffers_ms_total', 0.0)):.3f} | "
-            f"{float(item.get('total_ms', 0.0)):.3f} |"
+            f"{float(item.get('total_cpu_ms', 0.0)):.3f} |"
         )
     lines.append("")
-    lines.append("## Speedups")
+    lines.append("## Speedups (wall)")
     lines.append("")
-    for k, v in speedups.items():
-        lines.append(_speed_line(k, v))
+    for k in (
+        "cpp_native_vs_python_total_x",
+        "cpp_opencv_vs_python_total_x",
+        "cpp_native_vs_opencv_total_x",
+        "cpp_native_vs_opencv_contours_x",
+        "cpp_native_vs_opencv_triangulation_x",
+    ):
+        lines.append(_speed_line(k, speedups.get(k)))
+    lines.append("")
+    lines.append("## Speedups (cumulative CPU)")
+    lines.append("")
+    for k in (
+        "cpp_native_vs_python_total_cpu_x",
+        "cpp_opencv_vs_python_total_cpu_x",
+        "cpp_native_vs_opencv_total_cpu_x",
+    ):
+        lines.append(_speed_line(k, speedups.get(k)))
     lines.append("")
     lines.append("## Functional deltas vs python")
     lines.append("")

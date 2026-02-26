@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 import logging
 import math
+import os
 from time import perf_counter
 from typing import Callable
 
@@ -11,13 +14,22 @@ import numpy as np
 from accloud_core.logging_contract import emit_event, get_op_id
 from render3d_core.perf import BuildMetrics
 from render3d_core.task_runner import CancelledError
-from render3d_core.types import LayerRange, Point2D, PwmbContourGeometry, PwmbContourStack
+from render3d_core.types import LayerLoops, LayerRange, Point2D, PwmbContourGeometry, PwmbContourStack
 
 
 Point3DLayer = tuple[float, float, float, float]
 Triangle2D = tuple[Point2D, Point2D, Point2D]
 TriangulationResult = list[Triangle2D] | dict[str, np.ndarray]
 LOGGER_BUILD = logging.getLogger("render3d.build")
+
+
+@dataclass(slots=True)
+class _LayerGeometryBuild:
+    layer_id: int
+    triangle_vertices: list[Point3DLayer]
+    line_vertices: list[Point3DLayer]
+    point_vertices: list[Point3DLayer]
+    task_ms: float
 
 
 def build_geometry_v2(
@@ -83,87 +95,147 @@ def build_geometry_v2(
 
         z_center = (float(layer_ids[0]) + float(layer_ids[-1])) * 0.5
         vertex_budget = max_vertices if max_vertices is not None and max_vertices > 0 else None
+        worker_count = _resolve_worker_count(
+            metrics=metrics,
+            layer_ids=layer_ids,
+            stack=stack,
+            include_fill=include_fill,
+        )
+        use_parallel = worker_count > 1 and len(layer_ids) > 1 and vertex_budget is None
+        if metrics is not None:
+            metrics.triangulation_workers_effective = worker_count if use_parallel else 1
+        triangulation_task_ms = 0.0
 
-        stop_all = False
-        for layer_id in layer_ids:
-            _raise_if_cancelled(cancel_token)
-            layer_loops = stack.layers.get(layer_id)
-            if layer_loops is None:
-                continue
-            z = (float(layer_id) - z_center) * float(stack.pitch_z_mm)
-
-            outer_loops = [_prepare_loop(loop, stride=stride) for loop in layer_loops.outer]
-            hole_loops = [_prepare_loop(loop, stride=stride) for loop in layer_loops.holes]
-            outer_loops = [loop for loop in outer_loops if len(loop) >= 3 and abs(_signed_area(loop)) > 1e-12]
-            hole_loops = [loop for loop in hole_loops if len(loop) >= 3 and abs(_signed_area(loop)) > 1e-12]
-
-            tri_start = len(geometry.triangle_vertices)
-            tri_count = 0
-            if include_fill:
-                hole_map = _assign_holes_to_outers(outer_loops, hole_loops)
-                for outer_index, outer in enumerate(outer_loops):
+        if use_parallel:
+            chunks_by_layer: dict[int, _LayerGeometryBuild] = {}
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_map = {}
+                for layer_id in layer_ids:
                     _raise_if_cancelled(cancel_token)
-                    holes = hole_map.get(outer_index, [])
-                    triangulation_result = (
-                        triangulator(outer, holes)
-                        if triangulator is not None
-                        else _triangulate_polygon_with_holes(outer, holes)
+                    layer_loops = stack.layers.get(layer_id)
+                    if layer_loops is None:
+                        continue
+                    z = (float(layer_id) - z_center) * float(stack.pitch_z_mm)
+                    future = executor.submit(
+                        _build_layer_geometry,
+                        layer_id=layer_id,
+                        layer_loops=layer_loops,
+                        z=z,
+                        stride=stride,
+                        include_fill=include_fill,
+                        triangulator=triangulator,
+                        cancel_token=cancel_token,
                     )
-                    for a, b, c in _iter_triangles(triangulation_result):
+                    future_map[future] = layer_id
+
+                for future in as_completed(future_map):
+                    _raise_if_cancelled(cancel_token)
+                    chunk = future.result()
+                    chunks_by_layer[chunk.layer_id] = chunk
+                    triangulation_task_ms += float(chunk.task_ms)
+
+            for layer_id in layer_ids:
+                chunk = chunks_by_layer.get(layer_id)
+                if chunk is None:
+                    continue
+                tri_start = len(geometry.triangle_vertices)
+                tri_count = len(chunk.triangle_vertices)
+                geometry.triangle_vertices.extend(chunk.triangle_vertices)
+                geometry.tri_range[layer_id] = LayerRange(start=tri_start, count=tri_count)
+
+                line_start = len(geometry.line_vertices)
+                line_count = len(chunk.line_vertices)
+                geometry.line_vertices.extend(chunk.line_vertices)
+                geometry.line_range[layer_id] = LayerRange(start=line_start, count=line_count)
+
+                point_start = len(geometry.point_vertices)
+                point_count = len(chunk.point_vertices)
+                geometry.point_vertices.extend(chunk.point_vertices)
+                geometry.point_range[layer_id] = LayerRange(start=point_start, count=point_count)
+        else:
+            stop_all = False
+            for layer_id in layer_ids:
+                _raise_if_cancelled(cancel_token)
+                layer_loops = stack.layers.get(layer_id)
+                if layer_loops is None:
+                    continue
+                z = (float(layer_id) - z_center) * float(stack.pitch_z_mm)
+
+                outer_loops = [_prepare_loop(loop, stride=stride) for loop in layer_loops.outer]
+                hole_loops = [_prepare_loop(loop, stride=stride) for loop in layer_loops.holes]
+                outer_loops = [loop for loop in outer_loops if len(loop) >= 3 and abs(_signed_area(loop)) > 1e-12]
+                hole_loops = [loop for loop in hole_loops if len(loop) >= 3 and abs(_signed_area(loop)) > 1e-12]
+
+                tri_start = len(geometry.triangle_vertices)
+                tri_count = 0
+                if include_fill:
+                    hole_map = _assign_holes_to_outers(outer_loops, hole_loops)
+                    for outer_index, outer in enumerate(outer_loops):
                         _raise_if_cancelled(cancel_token)
-                        if _would_exceed_budget(geometry, vertex_budget, additional=3):
+                        holes = hole_map.get(outer_index, [])
+                        triangulation_result = (
+                            triangulator(outer, holes)
+                            if triangulator is not None
+                            else _triangulate_polygon_with_holes(outer, holes)
+                        )
+                        for a, b, c in _iter_triangles(triangulation_result):
+                            _raise_if_cancelled(cancel_token)
+                            if _would_exceed_budget(geometry, vertex_budget, additional=3):
+                                stop_all = True
+                                break
+                            tri_count += 3
+                            geometry.triangle_vertices.extend(
+                                [
+                                    _to_point4(a, z, layer_id),
+                                    _to_point4(b, z, layer_id),
+                                    _to_point4(c, z, layer_id),
+                                ]
+                            )
+                        if stop_all:
+                            break
+                geometry.tri_range[layer_id] = LayerRange(start=tri_start, count=tri_count)
+
+                line_start = len(geometry.line_vertices)
+                line_count = 0
+                point_start = len(geometry.point_vertices)
+                point_count = 0
+                for loop in [*outer_loops, *hole_loops]:
+                    _raise_if_cancelled(cancel_token)
+                    size = len(loop)
+                    for idx in range(size):
+                        _raise_if_cancelled(cancel_token)
+                        if _would_exceed_budget(geometry, vertex_budget, additional=2):
                             stop_all = True
                             break
-                        tri_count += 3
-                        geometry.triangle_vertices.extend(
-                            [
-                                _to_point4(a, z, layer_id),
-                                _to_point4(b, z, layer_id),
-                                _to_point4(c, z, layer_id),
-                            ]
-                        )
+                        p1 = loop[idx]
+                        p2 = loop[(idx + 1) % size]
+                        geometry.line_vertices.append(_to_point4(p1, z, layer_id))
+                        geometry.line_vertices.append(_to_point4(p2, z, layer_id))
+                        line_count += 2
                     if stop_all:
                         break
-            geometry.tri_range[layer_id] = LayerRange(start=tri_start, count=tri_count)
+                    for point in loop:
+                        _raise_if_cancelled(cancel_token)
+                        if _would_exceed_budget(geometry, vertex_budget, additional=1):
+                            stop_all = True
+                            break
+                        geometry.point_vertices.append(_to_point4(point, z, layer_id))
+                        point_count += 1
+                    if stop_all:
+                        break
 
-            line_start = len(geometry.line_vertices)
-            line_count = 0
-            point_start = len(geometry.point_vertices)
-            point_count = 0
-            for loop in [*outer_loops, *hole_loops]:
-                _raise_if_cancelled(cancel_token)
-                size = len(loop)
-                for idx in range(size):
-                    _raise_if_cancelled(cancel_token)
-                    if _would_exceed_budget(geometry, vertex_budget, additional=2):
-                        stop_all = True
-                        break
-                    p1 = loop[idx]
-                    p2 = loop[(idx + 1) % size]
-                    geometry.line_vertices.append(_to_point4(p1, z, layer_id))
-                    geometry.line_vertices.append(_to_point4(p2, z, layer_id))
-                    line_count += 2
-                if stop_all:
-                    break
-                for point in loop:
-                    _raise_if_cancelled(cancel_token)
-                    if _would_exceed_budget(geometry, vertex_budget, additional=1):
-                        stop_all = True
-                        break
-                    geometry.point_vertices.append(_to_point4(point, z, layer_id))
-                    point_count += 1
+                geometry.line_range[layer_id] = LayerRange(start=line_start, count=line_count)
+                geometry.point_range[layer_id] = LayerRange(start=point_start, count=point_count)
+
                 if stop_all:
                     break
 
-            geometry.line_range[layer_id] = LayerRange(start=line_start, count=line_count)
-            geometry.point_range[layer_id] = LayerRange(start=point_start, count=point_count)
-
-            if stop_all:
-                break
-
-        triangulation_ms = (perf_counter() - start_ms) * 1000.0
+        triangulation_wall_ms = (perf_counter() - start_ms) * 1000.0
         if metrics is not None:
-            metrics.triangulation_ms_total += triangulation_ms
+            if not use_parallel:
+                triangulation_task_ms = triangulation_wall_ms
+            metrics.triangulation_ms_total += triangulation_task_ms
+            metrics.triangulation_wall_ms += triangulation_wall_ms
         _finalize_contiguous_buffers(geometry, metrics=metrics)
         if metrics is not None:
             metrics.triangles_total = len(geometry.triangle_vertices) // 3
@@ -282,6 +354,103 @@ def _would_exceed_budget(
         return False
     total = len(geometry.triangle_vertices) + len(geometry.line_vertices) + len(geometry.point_vertices)
     return total + additional > budget
+
+
+def _resolve_worker_count(
+    *,
+    metrics: BuildMetrics | None,
+    layer_ids: list[int],
+    stack: PwmbContourStack,
+    include_fill: bool,
+) -> int:
+    layer_count = len(layer_ids)
+    if layer_count <= 1:
+        return 1
+    requested = 1
+    if metrics is not None:
+        try:
+            requested = int(metrics.workers)
+        except Exception:
+            requested = 1
+    requested = max(1, int(requested))
+    env_cap = _parse_worker_cap_env("RENDER3D_GEOMETRY_WORKERS_MAX")
+    cap = int(layer_count)
+    if env_cap is not None:
+        cap = min(cap, int(env_cap))
+    return max(1, min(cap, requested))
+
+
+def _parse_worker_cap_env(name: str) -> int | None:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        parsed = int(str(raw).strip())
+    except Exception:
+        return None
+    return max(1, parsed)
+
+
+def _build_layer_geometry(
+    *,
+    layer_id: int,
+    layer_loops: LayerLoops,
+    z: float,
+    stride: int,
+    include_fill: bool,
+    triangulator: Callable[[list[Point2D], list[list[Point2D]]], TriangulationResult] | None,
+    cancel_token: object | None,
+) -> _LayerGeometryBuild:
+    start_ts = perf_counter()
+    _raise_if_cancelled(cancel_token)
+    outer_loops = [_prepare_loop(loop, stride=stride) for loop in layer_loops.outer]
+    hole_loops = [_prepare_loop(loop, stride=stride) for loop in layer_loops.holes]
+    outer_loops = [loop for loop in outer_loops if len(loop) >= 3 and abs(_signed_area(loop)) > 1e-12]
+    hole_loops = [loop for loop in hole_loops if len(loop) >= 3 and abs(_signed_area(loop)) > 1e-12]
+
+    tri_vertices: list[Point3DLayer] = []
+    if include_fill:
+        hole_map = _assign_holes_to_outers(outer_loops, hole_loops)
+        for outer_index, outer in enumerate(outer_loops):
+            _raise_if_cancelled(cancel_token)
+            holes = hole_map.get(outer_index, [])
+            triangulation_result = (
+                triangulator(outer, holes)
+                if triangulator is not None
+                else _triangulate_polygon_with_holes(outer, holes)
+            )
+            for a, b, c in _iter_triangles(triangulation_result):
+                _raise_if_cancelled(cancel_token)
+                tri_vertices.extend(
+                    [
+                        _to_point4(a, z, layer_id),
+                        _to_point4(b, z, layer_id),
+                        _to_point4(c, z, layer_id),
+                    ]
+                )
+
+    line_vertices: list[Point3DLayer] = []
+    point_vertices: list[Point3DLayer] = []
+    for loop in [*outer_loops, *hole_loops]:
+        _raise_if_cancelled(cancel_token)
+        size = len(loop)
+        for idx in range(size):
+            _raise_if_cancelled(cancel_token)
+            p1 = loop[idx]
+            p2 = loop[(idx + 1) % size]
+            line_vertices.append(_to_point4(p1, z, layer_id))
+            line_vertices.append(_to_point4(p2, z, layer_id))
+        for point in loop:
+            _raise_if_cancelled(cancel_token)
+            point_vertices.append(_to_point4(point, z, layer_id))
+
+    return _LayerGeometryBuild(
+        layer_id=int(layer_id),
+        triangle_vertices=tri_vertices,
+        line_vertices=line_vertices,
+        point_vertices=point_vertices,
+        task_ms=(perf_counter() - start_ts) * 1000.0,
+    )
 
 
 def _raise_if_cancelled(cancel_token: object | None) -> None:

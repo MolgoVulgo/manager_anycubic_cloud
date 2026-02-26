@@ -1,6 +1,6 @@
 {
   "file": "pwmb_files/cube.pwmb",
-  "backend": "python",
+  "backend": "cpp",
   "params": {
     "threshold": 1,
     "bin_mode": "index_strict",
@@ -18,7 +18,7 @@
   },
   "checksums": {
     "tri_md5": "8a5bb44f2a395c301989a738706e71a6",
-    "line_md5": "eb8dc0325fc7fe32da42fd2a6baabaeb",
-    "point_md5": "4247bf18ca1834d47f724e70a12e419f"
+    "line_md5": "34fff9e1f07dde50812465b4d0afc28e",
+    "point_md5": "272c1750ee089df73d75fe3cf81c3ef1"
   }
 }

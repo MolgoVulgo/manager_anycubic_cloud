@@ -12,6 +12,13 @@ from render3d_core import BuildMetrics, build_geometry_pipeline, compute_file_si
 from render3d_core.invariants import build_invariant_snapshot
 
 
+def _resolve_workers(raw_value: int | None) -> int:
+    cpu_cap = max(1, int(os.cpu_count() or 1))
+    if raw_value is None:
+        return cpu_cap
+    return max(1, min(int(raw_value), cpu_cap))
+
+
 def _select_preview_xy_stride(*, width: int, height: int) -> int:
     pixels = max(0, int(width)) * max(0, int(height))
     if pixels >= 24_000_000:
@@ -51,6 +58,7 @@ def _run_case(
     pwmb_path: Path,
     *,
     backend_name: str,
+    workers: int,
     threshold: int,
     bin_mode: str,
     xy_stride: int | None,
@@ -61,7 +69,7 @@ def _run_case(
     cpp_contours_impl: str | None,
     cpp_opencv_approx: str | None,
 ) -> dict[str, object]:
-    metrics = BuildMetrics(pool_kind="threads", workers=1)
+    metrics = BuildMetrics(pool_kind="threads", workers=max(1, int(workers)))
     parse_start = perf_counter()
     document = read_pwmb_document(pwmb_path)
     metrics.parse_ms = (perf_counter() - parse_start) * 1000.0
@@ -166,6 +174,12 @@ def main() -> int:
     parser.add_argument("--max-vertices", type=int, default=None, help="Optional vertex budget.")
     parser.add_argument("--max-xy-stride", type=int, default=1, help="Geometry simplification stride.")
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Worker count for per-layer parallel stages (default: max available CPUs).",
+    )
+    parser.add_argument(
         "--cpp-contours-impl",
         default=None,
         choices=["native", "opencv", "auto"],
@@ -180,9 +194,12 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=None, help="Write JSON report to this path.")
     args = parser.parse_args()
 
+    workers = _resolve_workers(args.workers)
     files = _collect_pwmb_files(args.inputs, recursive=bool(args.recursive))
     report: dict[str, object] = {
         "backend_requested": args.backend,
+        "workers_requested": int(args.workers) if args.workers is not None else None,
+        "workers_effective": workers,
         "files_total": len(files),
         "results": [],
         "errors": [],
@@ -197,6 +214,7 @@ def main() -> int:
                 result = _run_case(
                     file_path,
                     backend_name=args.backend,
+                    workers=workers,
                     threshold=max(0, min(255, int(args.threshold))),
                     bin_mode=str(args.bin_mode),
                     xy_stride=max(1, int(args.xy_stride)) if args.xy_stride is not None else None,

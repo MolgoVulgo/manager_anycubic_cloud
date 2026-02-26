@@ -272,11 +272,10 @@ Si manquant :
 - Si plusieurs intentions distinctes apparaissent dans le diff, **split en commits séparés** (cohérents et minimaux).
 - Forme : impératif, intention principale (ex: `Fix pw0Img RLE decoding`, `Add GPU draw pipeline contracts`).
 
-#### Prompt standard: Commit Generator
 Utiliser ce prompt pour générer un message de commit orienté audit/PR review :
 
 ```text
-Rédige un message de commit Git en français, orienté audit/PR review.
+Rédige un message de commit Git en anglais, orienté audit/PR review.
 
 Contraintes:
 - Titre en anglais, format conventional commit: <type>(<scope>): <summary>

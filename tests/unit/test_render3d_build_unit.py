@@ -356,6 +356,100 @@ def test_build_contour_stack_decodes_sampled_layers_by_position(monkeypatch: pyt
     assert sorted(stack.layers.keys()) == [0, 10, 20]
 
 
+def test_build_contour_stack_parallel_workers_match_single_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    document = _make_document(width=4, height=4, layers=4)
+    decoded_by_position = {
+        0: np.asarray(
+            [
+                255, 255, 255, 255,
+                255, 255, 255, 255,
+                255, 255, 255, 255,
+                255, 255, 255, 255,
+            ],
+            dtype=np.uint8,
+        ),
+        1: np.asarray(
+            [
+                255, 255, 0, 0,
+                255, 255, 0, 0,
+                255, 255, 0, 0,
+                255, 255, 0, 0,
+            ],
+            dtype=np.uint8,
+        ),
+        2: np.asarray(
+            [
+                0, 0, 0, 0,
+                0, 0, 0, 0,
+                0, 0, 0, 0,
+                0, 0, 0, 0,
+            ],
+            dtype=np.uint8,
+        ),
+        3: np.asarray(
+            [
+                0, 255, 0, 0,
+                255, 255, 255, 0,
+                0, 255, 0, 0,
+                0, 0, 0, 0,
+            ],
+            dtype=np.uint8,
+        ),
+    }
+
+    def _decode(_document, layer_index: int, **_kwargs):
+        return decoded_by_position[int(layer_index)]
+
+    monkeypatch.setattr("render3d_core.contours.decode_layer", _decode)
+    monkeypatch.setattr("render3d_core.contours.decode_layer_index_mask", _decode)
+
+    metrics_single = BuildMetrics(pool_kind="threads", workers=1)
+    stack_single = build_contour_stack(
+        document,
+        threshold=1,
+        binarization_mode="index_strict",
+        metrics=metrics_single,
+    )
+    metrics_parallel = BuildMetrics(pool_kind="threads", workers=4)
+    stack_parallel = build_contour_stack(
+        document,
+        threshold=1,
+        binarization_mode="index_strict",
+        metrics=metrics_parallel,
+    )
+
+    assert list(stack_parallel.layers.keys()) == list(stack_single.layers.keys())
+    assert stack_parallel.layers == stack_single.layers
+    assert metrics_parallel.layers_built == metrics_single.layers_built
+    assert metrics_parallel.layers_skipped == metrics_single.layers_skipped
+
+
+def test_build_contour_stack_uses_max_available_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    document = _make_document(width=4, height=4, layers=40)
+    decoded = np.asarray(
+        [
+            255, 255, 255, 255,
+            255, 255, 255, 255,
+            255, 255, 255, 255,
+            255, 255, 255, 255,
+        ],
+        dtype=np.uint8,
+    )
+
+    monkeypatch.setattr("render3d_core.contours.decode_layer", lambda *_args, **_kwargs: decoded)
+    monkeypatch.setattr("render3d_core.contours.decode_layer_index_mask", lambda *_args, **_kwargs: decoded)
+    metrics = BuildMetrics(pool_kind="threads", workers=32)
+
+    _ = build_contour_stack(
+        document,
+        threshold=1,
+        binarization_mode="index_strict",
+        metrics=metrics,
+    )
+
+    assert metrics.contours_workers_effective == 32
+
+
 def test_build_contour_stack_honors_cancellation_token(monkeypatch: pytest.MonkeyPatch) -> None:
     document = _make_document(width=2, height=2, layers=3)
     decoded = np.asarray([255, 255, 255, 255], dtype=np.uint8)
@@ -535,6 +629,64 @@ def test_build_geometry_v2_honors_cancellation_token() -> None:
             triangulator=_triangulator,
             cancel_token=token,
         )
+
+
+def test_build_geometry_v2_parallel_workers_match_single_worker() -> None:
+    stack = PwmbContourStack(
+        pitch_x_mm=0.1,
+        pitch_y_mm=0.1,
+        pitch_z_mm=0.05,
+        layers={
+            0: LayerLoops(
+                outer=[[(-2.0, -2.0), (2.0, -2.0), (2.0, 2.0), (-2.0, 2.0)]],
+                holes=[],
+            ),
+            1: LayerLoops(
+                outer=[[(-1.5, -1.0), (1.5, -1.0), (1.5, 1.0), (-1.5, 1.0)]],
+                holes=[],
+            ),
+            2: LayerLoops(
+                outer=[[(-1.0, -1.0), (1.2, -1.1), (1.0, 0.9), (-0.9, 1.1)]],
+                holes=[[(0.0, -0.2), (0.3, 0.0), (0.0, 0.2), (-0.2, 0.0)]],
+            ),
+        },
+    )
+
+    metrics_single = BuildMetrics(pool_kind="threads", workers=1)
+    geometry_single = build_geometry_v2(stack, metrics=metrics_single)
+    metrics_parallel = BuildMetrics(pool_kind="threads", workers=4)
+    geometry_parallel = build_geometry_v2(stack, metrics=metrics_parallel)
+
+    assert geometry_parallel.tri_range == geometry_single.tri_range
+    assert geometry_parallel.line_range == geometry_single.line_range
+    assert geometry_parallel.point_range == geometry_single.point_range
+    assert np.array_equal(geometry_parallel.triangle_vertices, geometry_single.triangle_vertices)
+    assert np.array_equal(geometry_parallel.line_vertices, geometry_single.line_vertices)
+    assert np.array_equal(geometry_parallel.point_vertices, geometry_single.point_vertices)
+    assert np.array_equal(geometry_parallel.triangle_indices, geometry_single.triangle_indices)
+    assert np.array_equal(geometry_parallel.line_indices, geometry_single.line_indices)
+    assert np.array_equal(geometry_parallel.point_indices, geometry_single.point_indices)
+
+
+def test_build_geometry_v2_uses_max_available_workers() -> None:
+    layers = {
+        layer_id: LayerLoops(
+            outer=[[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]],
+            holes=[],
+        )
+        for layer_id in range(40)
+    }
+    stack = PwmbContourStack(
+        pitch_x_mm=0.1,
+        pitch_y_mm=0.1,
+        pitch_z_mm=0.05,
+        layers=layers,
+    )
+    metrics = BuildMetrics(pool_kind="threads", workers=64)
+
+    _ = build_geometry_v2(stack, metrics=metrics)
+
+    assert metrics.triangulation_workers_effective == 40
 
 
 def test_render3d_pipeline_emits_expected_logging_events(monkeypatch: pytest.MonkeyPatch) -> None:

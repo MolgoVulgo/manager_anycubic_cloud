@@ -13,6 +13,13 @@ from render3d_core.invariants import build_invariant_snapshot
 from render3d_core.types import PwmbContourStack
 
 
+def _resolve_workers(raw_value: int | None) -> int:
+    cpu_cap = max(1, int(os.cpu_count() or 1))
+    if raw_value is None:
+        return cpu_cap
+    return max(1, min(int(raw_value), cpu_cap))
+
+
 def _collect_pwmb_files(entries: list[str], *, recursive: bool) -> list[Path]:
     selected: list[Path] = []
     seen: set[Path] = set()
@@ -56,6 +63,7 @@ def _bbox_delta(lhs: tuple[float, ...] | None, rhs: tuple[float, ...] | None) ->
 def _compare_case(
     path: Path,
     *,
+    workers: int,
     threshold: int,
     bin_mode: str,
     xy_stride: int,
@@ -84,8 +92,8 @@ def _compare_case(
         if cpp_backend.name != "cpp":
             raise RuntimeError("cpp backend unavailable (pwmb_geom not importable)")
 
-        py_metrics = BuildMetrics(pool_kind="threads", workers=1)
-        cpp_metrics = BuildMetrics(pool_kind="threads", workers=1)
+        py_metrics = BuildMetrics(pool_kind="threads", workers=max(1, int(workers)))
+        cpp_metrics = BuildMetrics(pool_kind="threads", workers=max(1, int(workers)))
 
         py_result = build_geometry_pipeline(
             document,
@@ -155,6 +163,7 @@ def _compare_case(
         "bin_mode": bin_mode,
         "xy_stride": xy_stride,
         "z_stride": max(1, int(z_stride)),
+        "workers": int(workers),
         "max_layers": max_layers,
         "max_vertices": max_vertices,
         "max_xy_stride": max_xy_stride,
@@ -204,6 +213,12 @@ def main() -> int:
     parser.add_argument("--max-vertices", type=int, default=None, help="Optional vertex budget.")
     parser.add_argument("--max-xy-stride", type=int, default=1, help="Geometry simplification stride.")
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Worker count for per-layer parallel stages (default: max available CPUs).",
+    )
+    parser.add_argument(
         "--cpp-contours-impl",
         default=None,
         choices=["native", "opencv", "auto"],
@@ -219,8 +234,11 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=None, help="Write JSON report to this path.")
     args = parser.parse_args()
 
+    workers = _resolve_workers(args.workers)
     files = _collect_pwmb_files(args.inputs, recursive=bool(args.recursive))
     report: dict[str, Any] = {
+        "workers_requested": int(args.workers) if args.workers is not None else None,
+        "workers_effective": workers,
         "files_total": len(files),
         "results": [],
         "errors": [],
@@ -229,6 +247,7 @@ def main() -> int:
         try:
             result = _compare_case(
                 path,
+                workers=workers,
                 threshold=max(0, min(255, int(args.threshold))),
                 bin_mode=str(args.bin_mode),
                 xy_stride=max(1, int(args.xy_stride)),

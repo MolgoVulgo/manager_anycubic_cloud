@@ -29,14 +29,14 @@ def _document() -> PwmbDocument:
     )
 
 
-def test_resolve_geometry_backend_defaults_to_python_when_cpp_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_geometry_backend_raises_when_cpp_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     def _raise(_name: str):
         raise ModuleNotFoundError("pwmb_geom missing")
 
     monkeypatch.delenv(GEOM_BACKEND_ENV, raising=False)
     monkeypatch.setattr("render3d_core.backend.importlib.import_module", _raise)
-    backend = resolve_geometry_backend()
-    assert backend.name == "python"
+    with pytest.raises(RuntimeError, match="requires pwmb_geom"):
+        _ = resolve_geometry_backend()
 
 
 def test_resolve_geometry_backend_auto_prefers_cpp_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -50,13 +50,24 @@ def test_resolve_geometry_backend_auto_prefers_cpp_when_available(monkeypatch: p
     assert backend.name == "cpp"
 
 
-def test_resolve_geometry_backend_cpp_falls_back_if_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_geometry_backend_cpp_raises_if_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     def _raise(_name: str):
         raise ModuleNotFoundError("pwmb_geom missing")
 
     monkeypatch.setattr("render3d_core.backend.importlib.import_module", _raise)
-    backend = resolve_geometry_backend(preferred="cpp")
-    assert backend.name == "python"
+    with pytest.raises(RuntimeError, match="requires pwmb_geom"):
+        _ = resolve_geometry_backend(preferred="cpp")
+
+
+def test_resolve_geometry_backend_rejects_python_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = SimpleNamespace(
+        build_contours=lambda **_kwargs: PwmbContourStack(pitch_x_mm=0.1, pitch_y_mm=0.1, pitch_z_mm=0.05),
+        build_geometry=lambda **_kwargs: PwmbContourGeometry(),
+    )
+    monkeypatch.setattr("render3d_core.backend.importlib.import_module", lambda _name: module)
+
+    with pytest.raises(RuntimeError, match="GEOM_BACKEND=python"):
+        _ = resolve_geometry_backend(preferred="python")
 
 
 def test_resolve_geometry_backend_cpp_when_module_is_available(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,0 +1,67 @@
+{
+  "backend_requested": "cpp",
+  "workers_requested": 999,
+  "workers_effective": 32,
+  "files_total": 1,
+  "results": [
+    {
+      "file": "/home/kaj/Develop/python/manager_anycubic_cloud/pwmb_files/raven_skull-12-25-v3.pwmb",
+      "file_signature": "size=68287039:mtime=1771975218573532840:sha1=98f61d991cba793816aa289934117454b8957075",
+      "backend": "cpp",
+      "threshold": 1,
+      "bin_mode": "index_strict",
+      "xy_stride": 1,
+      "z_stride": 1,
+      "max_layers": null,
+      "max_vertices": null,
+      "max_xy_stride": 1,
+      "metrics": {
+        "parse_ms": 1.746,
+        "decode_ms_total": 4850266.78,
+        "decode_mb_s": 0.013,
+        "contours_ms_total": 192321.235,
+        "contours_wall_ms": 158288.511,
+        "triangulation_ms_total": 4570020.932,
+        "triangulation_wall_ms": 212777.869,
+        "contour_stage_parallelism": 31.857,
+        "triangulation_parallelism": 21.478,
+        "buffers_ms_total": 25039.833,
+        "layers_total": 585,
+        "layers_built": 584,
+        "layers_skipped": 1,
+        "loops_total": 191171,
+        "vertices_total": 122555604,
+        "triangles_total": 16519642,
+        "pool_kind": "threads",
+        "workers": 32,
+        "contours_workers_effective": 32,
+        "triangulation_workers_effective": 32
+      },
+      "invariants": {
+        "contour_area_mm2": 766939.764263,
+        "mesh_area_mm2": 766939.740287,
+        "contour_bbox": [
+          -84.07360372924805,
+          -57.48240254974366,
+          85.07120377349854,
+          57.00080252838135
+        ],
+        "mesh_bbox": [
+          -84.07360076904297,
+          -57.48240280151367,
+          -14.574999809265137,
+          85.07120513916016,
+          57.00080108642578,
+          14.574999809265137
+        ],
+        "triangle_count": 16519642,
+        "degenerate_triangles": 0
+      },
+      "cpp_contours_impl_requested": "native",
+      "cpp_contours_impl_effective": "native",
+      "cpp_opencv_approx_requested": null,
+      "cpp_opencv_approx_effective": "simple"
+    }
+  ],
+  "errors": []
+}

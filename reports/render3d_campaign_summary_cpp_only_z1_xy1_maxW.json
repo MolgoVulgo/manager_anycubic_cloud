@@ -1,0 +1,77 @@
+{
+  "protocol": {
+    "scope_files": [
+      "cube.pwmb",
+      "raven_skull-12-25-v3.pwmb",
+      "raven_skull_19_12.pwmb"
+    ],
+    "xy_stride": 1,
+    "z_stride": 1,
+    "bin_mode": "index_strict",
+    "threshold": 1,
+    "workers_effective": 32
+  },
+  "aggregate": {
+    "cpp_native": {
+      "parse_ms_total": 4.686,
+      "decode_ms_total": 10352185.84,
+      "contours_ms_total": 610743.159,
+      "triangulation_ms_total": 15189052.584,
+      "contours_wall_ms_total": 344656.11100000003,
+      "triangulation_wall_ms_total": 561421.886,
+      "buffers_ms_total": 68780.53700000001,
+      "total_cpu_ms": 26220762.120000005,
+      "total_wall_ms": 974863.2200000002
+    },
+    "cpp_opencv": {
+      "parse_ms_total": 4.916,
+      "decode_ms_total": 8911066.254,
+      "contours_ms_total": 532959.299,
+      "triangulation_ms_total": 18090716.950999998,
+      "contours_wall_ms_total": 297369.306,
+      "triangulation_wall_ms_total": 665774.586,
+      "buffers_ms_total": 66965.383,
+      "total_cpu_ms": 27601707.887000002,
+      "total_wall_ms": 1030114.1910000001
+    }
+  },
+  "speedups": {
+    "cpp_native_vs_opencv_total_wall_x": 1.0566756134260558,
+    "cpp_native_vs_opencv_total_cpu_x": 1.0526661185773343,
+    "cpp_native_vs_opencv_contours_cpu_x": 0.8726406364872603,
+    "cpp_native_vs_opencv_triangulation_cpu_x": 1.1910365607698654
+  },
+  "per_file": [
+    {
+      "file": "cube.pwmb",
+      "native_total_wall_ms": 10150.044999999998,
+      "opencv_total_wall_ms": 11796.161,
+      "native_total_cpu_ms": 307471.887,
+      "opencv_total_cpu_ms": 355716.641,
+      "opencv_vs_native_mesh_area_delta_mm2": 0.0,
+      "opencv_vs_native_triangle_count_delta": 0
+    },
+    {
+      "file": "raven_skull-12-25-v3.pwmb",
+      "native_total_wall_ms": 396107.95900000003,
+      "opencv_total_wall_ms": 430992.3,
+      "native_total_cpu_ms": 9637648.780000001,
+      "opencv_total_cpu_ms": 10051937.052,
+      "opencv_vs_native_mesh_area_delta_mm2": 0.0,
+      "opencv_vs_native_triangle_count_delta": 5224
+    },
+    {
+      "file": "raven_skull_19_12.pwmb",
+      "native_total_wall_ms": 568605.2160000001,
+      "opencv_total_wall_ms": 587325.7300000001,
+      "native_total_cpu_ms": 16275641.453000002,
+      "opencv_total_cpu_ms": 17194054.194000002,
+      "opencv_vs_native_mesh_area_delta_mm2": -27.229117000009865,
+      "opencv_vs_native_triangle_count_delta": 9170
+    }
+  ],
+  "decision": {
+    "default_recommended": "native",
+    "reason": "best total wall time and best functional parity on measured corpus"
+  }
+}

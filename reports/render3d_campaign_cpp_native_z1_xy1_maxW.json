@@ -1,0 +1,183 @@
+{
+  "backend_requested": "cpp",
+  "workers_requested": 999,
+  "workers_effective": 32,
+  "files_total": 3,
+  "results": [
+    {
+      "file": "/home/kaj/Develop/python/manager_anycubic_cloud/pwmb_files/cube.pwmb",
+      "file_signature": "size=2292920:mtime=1771666298614342397:sha1=f7a1a9dea0d2290f3f87d3abc0ee4b54e4aee5fc",
+      "backend": "cpp",
+      "threshold": 1,
+      "bin_mode": "index_strict",
+      "xy_stride": 1,
+      "z_stride": 1,
+      "max_layers": null,
+      "max_vertices": null,
+      "max_xy_stride": 1,
+      "metrics": {
+        "parse_ms": 1.033,
+        "decode_ms_total": 281300.975,
+        "decode_mb_s": 0.007,
+        "contours_ms_total": 26165.971,
+        "contours_wall_ms": 10137.748,
+        "triangulation_ms_total": 4.022,
+        "triangulation_wall_ms": 10.345,
+        "contour_stage_parallelism": 30.329,
+        "triangulation_parallelism": 0.389,
+        "buffers_ms_total": 0.919,
+        "layers_total": 200,
+        "layers_built": 200,
+        "layers_skipped": 0,
+        "loops_total": 200,
+        "vertices_total": 3600,
+        "triangles_total": 400,
+        "pool_kind": "threads",
+        "workers": 32,
+        "contours_workers_effective": 32,
+        "triangulation_workers_effective": 32
+      },
+      "invariants": {
+        "contour_area_mm2": 19904.116966,
+        "mesh_area_mm2": 19904.118347,
+        "contour_bbox": [
+          -5.0568002243042,
+          -4.988000221252442,
+          4.919200218200684,
+          4.988000221252442
+        ],
+        "mesh_bbox": [
+          -5.056800365447998,
+          -4.988000392913818,
+          -4.974999904632568,
+          4.919200420379639,
+          4.988000392913818,
+          4.974999904632568
+        ],
+        "triangle_count": 400,
+        "degenerate_triangles": 0
+      },
+      "cpp_contours_impl_requested": "native",
+      "cpp_contours_impl_effective": "native",
+      "cpp_opencv_approx_requested": null,
+      "cpp_opencv_approx_effective": "simple"
+    },
+    {
+      "file": "/home/kaj/Develop/python/manager_anycubic_cloud/pwmb_files/raven_skull-12-25-v3.pwmb",
+      "file_signature": "size=68287039:mtime=1771975218573532840:sha1=98f61d991cba793816aa289934117454b8957075",
+      "backend": "cpp",
+      "threshold": 1,
+      "bin_mode": "index_strict",
+      "xy_stride": 1,
+      "z_stride": 1,
+      "max_layers": null,
+      "max_vertices": null,
+      "max_xy_stride": 1,
+      "metrics": {
+        "parse_ms": 1.746,
+        "decode_ms_total": 4850266.78,
+        "decode_mb_s": 0.013,
+        "contours_ms_total": 192321.235,
+        "contours_wall_ms": 158288.511,
+        "triangulation_ms_total": 4570020.932,
+        "triangulation_wall_ms": 212777.869,
+        "contour_stage_parallelism": 31.857,
+        "triangulation_parallelism": 21.478,
+        "buffers_ms_total": 25039.833,
+        "layers_total": 585,
+        "layers_built": 584,
+        "layers_skipped": 1,
+        "loops_total": 191171,
+        "vertices_total": 122555604,
+        "triangles_total": 16519642,
+        "pool_kind": "threads",
+        "workers": 32,
+        "contours_workers_effective": 32,
+        "triangulation_workers_effective": 32
+      },
+      "invariants": {
+        "contour_area_mm2": 766939.764263,
+        "mesh_area_mm2": 766939.740287,
+        "contour_bbox": [
+          -84.07360372924805,
+          -57.48240254974366,
+          85.07120377349854,
+          57.00080252838135
+        ],
+        "mesh_bbox": [
+          -84.07360076904297,
+          -57.48240280151367,
+          -14.574999809265137,
+          85.07120513916016,
+          57.00080108642578,
+          14.574999809265137
+        ],
+        "triangle_count": 16519642,
+        "degenerate_triangles": 0
+      },
+      "cpp_contours_impl_requested": "native",
+      "cpp_contours_impl_effective": "native",
+      "cpp_opencv_approx_requested": null,
+      "cpp_opencv_approx_effective": "simple"
+    },
+    {
+      "file": "/home/kaj/Develop/python/manager_anycubic_cloud/pwmb_files/raven_skull_19_12.pwmb",
+      "file_signature": "size=60607926:mtime=1771975252767395953:sha1=5ce4906ed5a5f39500964be660590824b5f55a0b",
+      "backend": "cpp",
+      "threshold": 1,
+      "bin_mode": "index_strict",
+      "xy_stride": 1,
+      "z_stride": 1,
+      "max_layers": null,
+      "max_vertices": null,
+      "max_xy_stride": 1,
+      "metrics": {
+        "parse_ms": 1.907,
+        "decode_ms_total": 5220618.085,
+        "decode_mb_s": 0.011,
+        "contours_ms_total": 392255.953,
+        "contours_wall_ms": 176229.852,
+        "triangulation_ms_total": 10619027.63,
+        "triangulation_wall_ms": 348633.672,
+        "contour_stage_parallelism": 31.85,
+        "triangulation_parallelism": 30.459,
+        "buffers_ms_total": 43739.785,
+        "layers_total": 835,
+        "layers_built": 835,
+        "layers_skipped": 0,
+        "loops_total": 300481,
+        "vertices_total": 152081028,
+        "triangles_total": 20869892,
+        "pool_kind": "threads",
+        "workers": 32,
+        "contours_workers_effective": 32,
+        "triangulation_workers_effective": 32
+      },
+      "invariants": {
+        "contour_area_mm2": 856657.585687,
+        "mesh_area_mm2": 925988.777425,
+        "contour_bbox": [
+          -77.19360342407228,
+          -50.12080222320557,
+          77.19360342407228,
+          50.12080222320557
+        ],
+        "mesh_bbox": [
+          -77.193603515625,
+          -50.12080383300781,
+          -20.850000381469727,
+          77.193603515625,
+          50.12080383300781,
+          20.850000381469727
+        ],
+        "triangle_count": 20869892,
+        "degenerate_triangles": 0
+      },
+      "cpp_contours_impl_requested": "native",
+      "cpp_contours_impl_effective": "native",
+      "cpp_opencv_approx_requested": null,
+      "cpp_opencv_approx_effective": "simple"
+    }
+  ],
+  "errors": []
+}

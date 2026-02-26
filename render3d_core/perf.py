@@ -6,10 +6,17 @@ from dataclasses import dataclass
 @dataclass(slots=True)
 class BuildMetrics:
     parse_ms: float = 0.0
+    # Task cumulative time: sum of per-layer jobs (can exceed wall time in parallel mode).
     decode_ms_total: float = 0.0
     decode_mb_s: float = 0.0
+    # Task cumulative time: sum of per-layer contour jobs.
     contours_ms_total: float = 0.0
+    # Wall-clock time for full contour stage (decode + mask + loops + assemble).
+    contours_wall_ms: float = 0.0
+    # Task cumulative time: sum of per-layer triangulation jobs.
     triangulation_ms_total: float = 0.0
+    # Wall-clock time for triangulation stage.
+    triangulation_wall_ms: float = 0.0
     buffers_ms_total: float = 0.0
     layers_total: int = 0
     layers_built: int = 0
@@ -19,14 +26,26 @@ class BuildMetrics:
     triangles_total: int = 0
     pool_kind: str = "threads"
     workers: int = 1
+    contours_workers_effective: int = 1
+    triangulation_workers_effective: int = 1
 
     def as_log_data(self) -> dict[str, object]:
+        contour_stage_parallelism = 0.0
+        if self.contours_wall_ms > 0.0:
+            contour_stage_parallelism = (self.decode_ms_total + self.contours_ms_total) / self.contours_wall_ms
+        triangulation_parallelism = 0.0
+        if self.triangulation_wall_ms > 0.0:
+            triangulation_parallelism = self.triangulation_ms_total / self.triangulation_wall_ms
         return {
             "parse_ms": round(self.parse_ms, 3),
             "decode_ms_total": round(self.decode_ms_total, 3),
             "decode_mb_s": round(self.decode_mb_s, 3),
             "contours_ms_total": round(self.contours_ms_total, 3),
+            "contours_wall_ms": round(self.contours_wall_ms, 3),
             "triangulation_ms_total": round(self.triangulation_ms_total, 3),
+            "triangulation_wall_ms": round(self.triangulation_wall_ms, 3),
+            "contour_stage_parallelism": round(contour_stage_parallelism, 3),
+            "triangulation_parallelism": round(triangulation_parallelism, 3),
             "buffers_ms_total": round(self.buffers_ms_total, 3),
             "layers_total": int(self.layers_total),
             "layers_built": int(self.layers_built),
@@ -36,6 +55,8 @@ class BuildMetrics:
             "triangles_total": int(self.triangles_total),
             "pool_kind": self.pool_kind,
             "workers": int(self.workers),
+            "contours_workers_effective": int(self.contours_workers_effective),
+            "triangulation_workers_effective": int(self.triangulation_workers_effective),
         }
 
 

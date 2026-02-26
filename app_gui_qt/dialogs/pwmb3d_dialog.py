@@ -67,7 +67,6 @@ _VIEWER_LINE_WIDTH_ENV = "RENDER3D_LINE_WIDTH_PX"
 _VIEWER_POINT_SIZE_ENV = "RENDER3D_POINT_SIZE_PX"
 _VIEWER_FILL_ALPHA_SCALE_ENV = "RENDER3D_FILL_ALPHA_SCALE"
 _VALID_POOL_KINDS = {"auto", "threads", "processes"}
-_DEFAULT_POOL_WORKERS = 2
 _DEFAULT_MSAA_SAMPLES = 4
 _DEFAULT_LINE_WIDTH_PX = 1.35
 _DEFAULT_POINT_SIZE_PX = 2.25
@@ -173,13 +172,13 @@ def _resolve_palette(label: str | None) -> _RenderPalette:
 
 
 def _coerce_pool_workers(raw_value: str | None) -> int:
+    cpu_cap = max(1, int(os.cpu_count() or 1))
     if raw_value is None or str(raw_value).strip() == "":
-        return _DEFAULT_POOL_WORKERS
+        return cpu_cap
     try:
         parsed = int(str(raw_value).strip())
     except Exception:
-        return _DEFAULT_POOL_WORKERS
-    cpu_cap = max(1, int(os.cpu_count() or 1))
+        return cpu_cap
     return max(1, min(parsed, cpu_cap))
 
 
@@ -210,7 +209,7 @@ def _resolve_runner_strategy(*, backend_name: str) -> _RunnerStrategy:
     return _RunnerStrategy(
         pool_kind="threads",
         workers=workers,
-        reason="auto: python backend fallback keeps threads for viewer cancellation/progress",
+        reason="auto: render3d backend is cpp-only, threads selected",
     )
 
 
@@ -502,8 +501,9 @@ def _build_geometry_job(
                 },
             )
             LOGGER_BUILD.info(
-                "PWMB geometry build_ms=%.3f triangles=%d lines=%d points=%d",
+                "PWMB geometry build_task_ms=%.3f build_wall_ms=%.3f triangles=%d lines=%d points=%d",
                 metrics.triangulation_ms_total,
+                metrics.triangulation_wall_ms,
                 len(geometry.triangle_vertices) // 3,
                 len(geometry.line_vertices) // 2,
                 len(geometry.point_vertices),
