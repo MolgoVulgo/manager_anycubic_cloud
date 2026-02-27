@@ -8,6 +8,7 @@ from pathlib import Path
 from time import perf_counter
 
 from pwmb_core import read_pwmb_document
+from render3d_core.parallel_policy import RENDER3D_PARALLEL_POLICY_ENV, resolve_parallel_policy
 from render3d_core import BuildMetrics, build_geometry_pipeline, compute_file_signature, resolve_geometry_backend
 from render3d_core.invariants import build_invariant_snapshot
 
@@ -68,6 +69,7 @@ def _run_case(
     max_xy_stride: int,
     cpp_contours_impl: str | None,
     cpp_opencv_approx: str | None,
+    parallel_policy: str | None,
 ) -> dict[str, object]:
     metrics = BuildMetrics(pool_kind="threads", workers=max(1, int(workers)))
     parse_start = perf_counter()
@@ -76,14 +78,19 @@ def _run_case(
 
     prev_cpp_impl = os.getenv("GEOM_CPP_CONTOURS_IMPL")
     prev_cpp_opencv_approx = os.getenv("GEOM_CPP_OPENCV_APPROX")
+    prev_parallel_policy = os.getenv(RENDER3D_PARALLEL_POLICY_ENV)
     cpp_impl_effective: str | None = None
     cpp_opencv_approx_effective: str | None = None
+    parallel_policy_effective: str | None = None
     if cpp_contours_impl is not None:
         os.environ["GEOM_CPP_CONTOURS_IMPL"] = str(cpp_contours_impl)
     if cpp_opencv_approx is not None:
         os.environ["GEOM_CPP_OPENCV_APPROX"] = str(cpp_opencv_approx)
+    if parallel_policy is not None:
+        os.environ[RENDER3D_PARALLEL_POLICY_ENV] = str(parallel_policy)
     try:
         backend = resolve_geometry_backend(preferred=backend_name)
+        parallel_policy_effective = str(resolve_parallel_policy())
         signature = compute_file_signature(pwmb_path)
         effective_xy_stride = xy_stride or _select_preview_xy_stride(width=document.width, height=document.height)
         build_result = build_geometry_pipeline(
@@ -125,6 +132,11 @@ def _run_case(
                 os.environ.pop("GEOM_CPP_OPENCV_APPROX", None)
             else:
                 os.environ["GEOM_CPP_OPENCV_APPROX"] = prev_cpp_opencv_approx
+        if parallel_policy is not None:
+            if prev_parallel_policy is None:
+                os.environ.pop(RENDER3D_PARALLEL_POLICY_ENV, None)
+            else:
+                os.environ[RENDER3D_PARALLEL_POLICY_ENV] = prev_parallel_policy
     contour_stack = build_result.contour_stack
     geometry = build_result.geometry
 
@@ -146,6 +158,8 @@ def _run_case(
         "cpp_contours_impl_effective": cpp_impl_effective,
         "cpp_opencv_approx_requested": str(cpp_opencv_approx) if cpp_opencv_approx is not None else None,
         "cpp_opencv_approx_effective": cpp_opencv_approx_effective,
+        "parallel_policy_requested": str(parallel_policy) if parallel_policy is not None else None,
+        "parallel_policy_effective": parallel_policy_effective,
     }
     return payload
 
@@ -160,7 +174,7 @@ def main() -> int:
         help="PWMB file(s) or directory(ies).",
     )
     parser.add_argument("--recursive", action="store_true", help="Recurse into directories.")
-    parser.add_argument("--backend", default="python", choices=["python", "cpp"], help="Geometry backend.")
+    parser.add_argument("--backend", default="cpp", choices=["cpp"], help="Geometry backend (cpp only).")
     parser.add_argument("--threshold", type=int, default=1, help="Binarization threshold [0..255].")
     parser.add_argument(
         "--bin-mode",
@@ -190,6 +204,12 @@ def main() -> int:
         default=None,
         choices=["simple", "tc89_l1", "tc89_kcos"],
         help="OpenCV contour approximation mode (used when cpp contours impl resolves to opencv).",
+    )
+    parser.add_argument(
+        "--parallel-policy",
+        default=None,
+        choices=["python_fanout", "cpp_internal", "auto"],
+        help="Parallel policy override (RENDER3D_PARALLEL_POLICY).",
     )
     parser.add_argument("--output", type=Path, default=None, help="Write JSON report to this path.")
     args = parser.parse_args()
@@ -224,6 +244,7 @@ def main() -> int:
                     max_xy_stride=max(1, int(args.max_xy_stride)),
                     cpp_contours_impl=str(args.cpp_contours_impl) if args.cpp_contours_impl is not None else None,
                     cpp_opencv_approx=str(args.cpp_opencv_approx) if args.cpp_opencv_approx is not None else None,
+                    parallel_policy=str(args.parallel_policy) if args.parallel_policy is not None else None,
                 )
             except Exception as exc:
                 errors.append({"file": str(file_path), "error": f"{type(exc).__name__}: {exc}"})

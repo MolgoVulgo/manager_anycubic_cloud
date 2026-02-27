@@ -15,6 +15,7 @@ import numpy as np
 from accloud_core.logging_contract import emit_event, get_op_id
 from pwmb_core import decode_layer, decode_layer_index_mask, open_layer_blob_reader
 from pwmb_core.types import PwmbDocument
+from render3d_core.parallel_policy import uses_python_fanout
 from render3d_core.perf import BuildMetrics
 from render3d_core.task_runner import CancelledError
 from render3d_core.types import LayerLoops, PwmbContourStack
@@ -44,6 +45,9 @@ class _ContourLayerBuild:
     decode_ms: float
     contour_ms: float
     decoded_bytes: int
+    mask_build_ms: float = 0.0
+    contour_extract_ms: float = 0.0
+    loop_to_world_ms: float = 0.0
     decode_error_type: str | None = None
     decode_error_message: str | None = None
 
@@ -137,15 +141,20 @@ def build_contour_stack(
             built_layers: list[_ContourLayerBuild] = []
 
             if use_parallel:
+                chunk_size = _resolve_chunk_size(
+                    worker_count=worker_count,
+                    layer_count=len(layer_jobs),
+                    env_name="RENDER3D_CONTOURS_CHUNK_SIZE",
+                )
                 executor = ThreadPoolExecutor(max_workers=worker_count)
-                pending: set[Future[_ContourLayerBuild]] = set()
+                pending: set[Future[list[_ContourLayerBuild]]] = set()
                 try:
-                    for layer_position, layer in layer_jobs:
+                    for layer_chunk in _iter_layer_job_chunks(layer_jobs, chunk_size=chunk_size):
                         _raise_if_cancelled(cancel_token)
-                        future: Future[_ContourLayerBuild] = executor.submit(
-                            _build_contour_layer,
+                        future: Future[list[_ContourLayerBuild]] = executor.submit(
+                            _build_contour_chunk,
                             document=document,
-                            layer_position=layer_position,
+                            layer_positions=[position for position, _ in layer_chunk],
                             threshold=threshold,
                             binarization_mode=binarization_mode,
                             xy_step=xy_step,
@@ -163,43 +172,49 @@ def build_contour_stack(
                     for future in as_completed(pending):
                         pending.discard(future)
                         _raise_if_cancelled(cancel_token)
-                        result = future.result()
-                        layers_processed += 1
-                        if metrics is not None:
-                            metrics.decode_ms_total += result.decode_ms
-                            metrics.contours_ms_total += result.contour_ms
-                            decoded_bytes += max(0, int(result.decoded_bytes))
-                        if result.decode_error_type is not None:
+                        chunk_results = future.result()
+                        for result in chunk_results:
+                            layers_processed += 1
                             if metrics is not None:
-                                metrics.layers_skipped += 1
-                            decode_failures += 1
-                            if len(decode_failure_samples) < _DECODE_FAILURE_SAMPLE_LIMIT:
-                                decode_failure_samples.append(
-                                    {
-                                        "layer_index": int(result.layer_index),
-                                        "error_type": result.decode_error_type,
-                                        "error_message": str(result.decode_error_message or ""),
-                                    }
-                                )
-                            if _should_abort_decode_failures(
-                                layers_processed=layers_processed,
-                                decode_failures=decode_failures,
-                            ):
-                                fail_fast = True
-                                for task in pending:
-                                    task.cancel()
-                                break
-                            continue
-                        if result.layer_loops is None:
+                                metrics.decode_ms_total += result.decode_ms
+                                metrics.contours_ms_total += result.contour_ms
+                                metrics.mask_build_ms_total += result.mask_build_ms
+                                metrics.contour_extract_ms_total += result.contour_extract_ms
+                                metrics.loop_to_world_ms_total += result.loop_to_world_ms
+                                decoded_bytes += max(0, int(result.decoded_bytes))
+                            if result.decode_error_type is not None:
+                                if metrics is not None:
+                                    metrics.layers_skipped += 1
+                                decode_failures += 1
+                                if len(decode_failure_samples) < _DECODE_FAILURE_SAMPLE_LIMIT:
+                                    decode_failure_samples.append(
+                                        {
+                                            "layer_index": int(result.layer_index),
+                                            "error_type": result.decode_error_type,
+                                            "error_message": str(result.decode_error_message or ""),
+                                        }
+                                    )
+                                if _should_abort_decode_failures(
+                                    layers_processed=layers_processed,
+                                    decode_failures=decode_failures,
+                                ):
+                                    fail_fast = True
+                                    for task in pending:
+                                        task.cancel()
+                                    break
+                                continue
+                            if result.layer_loops is None:
+                                if metrics is not None:
+                                    metrics.layers_skipped += 1
+                                continue
+                            built_layers.append(result)
+                            total_outer += len(result.layer_loops.outer)
+                            total_holes += len(result.layer_loops.holes)
                             if metrics is not None:
-                                metrics.layers_skipped += 1
-                            continue
-                        built_layers.append(result)
-                        total_outer += len(result.layer_loops.outer)
-                        total_holes += len(result.layer_loops.holes)
-                        if metrics is not None:
-                            metrics.layers_built += 1
-                            metrics.loops_total += len(result.layer_loops.outer) + len(result.layer_loops.holes)
+                                metrics.layers_built += 1
+                                metrics.loops_total += len(result.layer_loops.outer) + len(result.layer_loops.holes)
+                        if fail_fast:
+                            break
                 finally:
                     executor.shutdown(wait=True, cancel_futures=True)
             else:
@@ -224,6 +239,9 @@ def build_contour_stack(
                     if metrics is not None:
                         metrics.decode_ms_total += result.decode_ms
                         metrics.contours_ms_total += result.contour_ms
+                        metrics.mask_build_ms_total += result.mask_build_ms
+                        metrics.contour_extract_ms_total += result.contour_extract_ms
+                        metrics.loop_to_world_ms_total += result.loop_to_world_ms
                         decoded_bytes += max(0, int(result.decoded_bytes))
                     if result.decode_error_type is not None:
                         if metrics is not None:
@@ -419,6 +437,78 @@ def smooth_contour_stack_preview(
     )
 
 
+def simplify_contour_stack(
+    stack: PwmbContourStack,
+    *,
+    tolerance_mm: float,
+    area_tolerance_ratio: float = 0.35,
+    bbox_tolerance_ratio: float = 0.30,
+    metrics: BuildMetrics | None = None,
+) -> PwmbContourStack:
+    eps = max(0.0, float(tolerance_mm))
+    if eps <= 0.0 or not stack.layers:
+        return stack
+    simplify_start = perf_counter()
+    changed = False
+    out_layers: dict[int, LayerLoops] = {}
+    points_before_total = 0
+    points_after_total = 0
+    points_before_max = 0
+    points_after_max = 0
+    layers_simplified = 0
+    for layer_id, loops in stack.layers.items():
+        simplified_outer: list[list[PointF]] = []
+        simplified_holes: list[list[PointF]] = []
+        layer_before = 0
+        layer_after = 0
+        layer_changed = False
+        for loop in loops.outer:
+            layer_before += len(loop)
+            simplified = _simplify_world_loop_rdp_with_guards(
+                loop,
+                epsilon_mm=eps,
+                area_tolerance_ratio=area_tolerance_ratio,
+                bbox_tolerance_ratio=bbox_tolerance_ratio,
+            )
+            simplified_outer.append(simplified)
+            layer_after += len(simplified)
+            layer_changed = layer_changed or (simplified is not loop)
+        for loop in loops.holes:
+            layer_before += len(loop)
+            simplified = _simplify_world_loop_rdp_with_guards(
+                loop,
+                epsilon_mm=eps,
+                area_tolerance_ratio=area_tolerance_ratio,
+                bbox_tolerance_ratio=bbox_tolerance_ratio,
+            )
+            simplified_holes.append(simplified)
+            layer_after += len(simplified)
+            layer_changed = layer_changed or (simplified is not loop)
+        points_before_total += layer_before
+        points_after_total += layer_after
+        points_before_max = max(points_before_max, layer_before)
+        points_after_max = max(points_after_max, layer_after)
+        if layer_changed:
+            layers_simplified += 1
+            changed = True
+        out_layers[layer_id] = LayerLoops(outer=simplified_outer, holes=simplified_holes)
+    if metrics is not None:
+        metrics.loop_simplify_ms_total += (perf_counter() - simplify_start) * 1000.0
+        metrics.points_before_simplify_total += int(points_before_total)
+        metrics.points_after_simplify_total += int(points_after_total)
+        metrics.points_before_simplify_max = max(int(metrics.points_before_simplify_max), int(points_before_max))
+        metrics.points_after_simplify_max = max(int(metrics.points_after_simplify_max), int(points_after_max))
+        metrics.layers_simplified += int(layers_simplified)
+    if not changed:
+        return stack
+    return PwmbContourStack(
+        pitch_x_mm=stack.pitch_x_mm,
+        pitch_y_mm=stack.pitch_y_mm,
+        pitch_z_mm=stack.pitch_z_mm,
+        layers=out_layers,
+    )
+
+
 def _subpixelize_pixel_layer_loops(layer_loops: PixelLayerLoops) -> PixelLayerLoops:
     sub_outer = [_subpixelize_loop_halfgrid(loop) for loop in layer_loops.outer]
     sub_holes = [_subpixelize_loop_halfgrid(loop) for loop in layer_loops.holes]
@@ -449,6 +539,8 @@ def _resolve_worker_count(
 ) -> int:
     if layer_count <= 1:
         return 1
+    if not uses_python_fanout():
+        return 1
     requested = 1
     if metrics is not None:
         try:
@@ -472,6 +564,67 @@ def _parse_worker_cap_env(name: str) -> int | None:
     except Exception:
         return None
     return max(1, parsed)
+
+
+def _resolve_chunk_size(*, worker_count: int, layer_count: int, env_name: str) -> int:
+    if layer_count <= 1:
+        return 1
+    env_chunk = _parse_worker_cap_env(env_name)
+    if env_chunk is not None:
+        return max(1, min(layer_count, int(env_chunk)))
+    target_chunks = max(1, int(worker_count) * 2)
+    baseline = int(math.ceil(float(layer_count) / float(target_chunks)))
+    tuned = max(8, min(32, baseline))
+    return max(1, min(layer_count, tuned))
+
+
+def _iter_layer_job_chunks(
+    layer_jobs: list[tuple[int, object]],
+    *,
+    chunk_size: int,
+) -> Iterable[list[tuple[int, object]]]:
+    size = max(1, int(chunk_size))
+    for start in range(0, len(layer_jobs), size):
+        yield layer_jobs[start : start + size]
+
+
+def _build_contour_chunk(
+    *,
+    document: PwmbDocument,
+    layer_positions: list[int],
+    threshold: int,
+    binarization_mode: str,
+    xy_step: int,
+    contour_extractor: str,
+    mask_width: int,
+    mask_height: int,
+    pitch_x_mm: float,
+    pitch_y_mm: float,
+    pixel_extractor: Callable[[np.ndarray], PixelLayerLoops],
+    decode_reader: object | None,
+    cancel_token: object | None,
+) -> list[_ContourLayerBuild]:
+    results: list[_ContourLayerBuild] = []
+    for layer_position in layer_positions:
+        _raise_if_cancelled(cancel_token)
+        results.append(
+            _build_contour_layer(
+                document=document,
+                layer_position=int(layer_position),
+                threshold=threshold,
+                binarization_mode=binarization_mode,
+                xy_step=xy_step,
+                contour_extractor=contour_extractor,
+                mask_width=mask_width,
+                mask_height=mask_height,
+                pitch_x_mm=pitch_x_mm,
+                pitch_y_mm=pitch_y_mm,
+                pixel_extractor=pixel_extractor,
+                decode_reader=decode_reader,
+                cancel_token=cancel_token,
+            )
+        )
+    return results
 
 
 def _build_contour_layer(
@@ -538,6 +691,10 @@ def _build_contour_layer(
         )
 
     contour_start = perf_counter()
+    mask_build_ms = 0.0
+    contour_extract_ms = 0.0
+    loop_to_world_ms = 0.0
+    mask_start = perf_counter()
     mask = _build_mask(
         values=decoded_arr,
         width=document.width,
@@ -546,6 +703,7 @@ def _build_contour_layer(
         mode=binarization_mode,
         xy_stride=xy_step,
     )
+    mask_build_ms = (perf_counter() - mask_start) * 1000.0
     if not bool(mask.any()):
         return _ContourLayerBuild(
             layer_position=layer_position,
@@ -554,9 +712,12 @@ def _build_contour_layer(
             decode_ms=decode_ms,
             contour_ms=(perf_counter() - contour_start) * 1000.0,
             decoded_bytes=max(0, int(layer.data_length)),
+            mask_build_ms=mask_build_ms,
         )
 
+    extract_start = perf_counter()
     pixel_loops = pixel_extractor(mask)
+    contour_extract_ms = (perf_counter() - extract_start) * 1000.0
     if not pixel_loops.outer and not pixel_loops.holes:
         return _ContourLayerBuild(
             layer_position=layer_position,
@@ -565,9 +726,13 @@ def _build_contour_layer(
             decode_ms=decode_ms,
             contour_ms=(perf_counter() - contour_start) * 1000.0,
             decoded_bytes=max(0, int(layer.data_length)),
+            mask_build_ms=mask_build_ms,
+            contour_extract_ms=contour_extract_ms,
         )
     if contour_extractor in {"subpixel_halfgrid", "marching_squares"}:
+        subpixel_start = perf_counter()
         pixel_loops = _subpixelize_pixel_layer_loops(pixel_loops)
+        contour_extract_ms += (perf_counter() - subpixel_start) * 1000.0
         if not pixel_loops.outer and not pixel_loops.holes:
             return _ContourLayerBuild(
                 layer_position=layer_position,
@@ -576,8 +741,11 @@ def _build_contour_layer(
                 decode_ms=decode_ms,
                 contour_ms=(perf_counter() - contour_start) * 1000.0,
                 decoded_bytes=max(0, int(layer.data_length)),
+                mask_build_ms=mask_build_ms,
+                contour_extract_ms=contour_extract_ms,
             )
 
+    world_start = perf_counter()
     world_outer = [
         _pixel_loop_to_world(
             loop,
@@ -598,6 +766,7 @@ def _build_contour_layer(
         )
         for loop in pixel_loops.holes
     ]
+    loop_to_world_ms = (perf_counter() - world_start) * 1000.0
     layer_loops = LayerLoops(
         outer=[loop for loop in world_outer if len(loop) >= 3],
         holes=[loop for loop in world_holes if len(loop) >= 3],
@@ -610,6 +779,9 @@ def _build_contour_layer(
             decode_ms=decode_ms,
             contour_ms=(perf_counter() - contour_start) * 1000.0,
             decoded_bytes=max(0, int(layer.data_length)),
+            mask_build_ms=mask_build_ms,
+            contour_extract_ms=contour_extract_ms,
+            loop_to_world_ms=loop_to_world_ms,
         )
 
     _raise_if_cancelled(cancel_token)
@@ -621,6 +793,9 @@ def _build_contour_layer(
         decode_ms=decode_ms,
         contour_ms=(contour_end - contour_start) * 1000.0,
         decoded_bytes=max(0, int(layer.data_length)),
+        mask_build_ms=mask_build_ms,
+        contour_extract_ms=contour_extract_ms,
+        loop_to_world_ms=loop_to_world_ms,
     )
 
 
@@ -999,6 +1174,141 @@ def _validate_smoothed_world_loop(
         if abs(cand_h - reference_bbox_h) / reference_bbox_h > bbox_tolerance_ratio:
             return False
     return True
+
+
+def _simplify_world_loop_rdp_with_guards(
+    loop: list[PointF],
+    *,
+    epsilon_mm: float,
+    area_tolerance_ratio: float,
+    bbox_tolerance_ratio: float,
+) -> list[PointF]:
+    if len(loop) <= 6:
+        return loop
+    points = np.asarray(loop, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 2 or points.shape[0] <= 6:
+        return loop
+    points = _dedup_closed_points_np(points)
+    if points.shape[0] <= 6:
+        return loop
+    reference_area = _signed_area_np(points)
+    reference_area_abs = abs(reference_area)
+    if reference_area_abs <= 1e-10:
+        return loop
+    reference_sign = 1.0 if reference_area >= 0.0 else -1.0
+    reference_bbox_w, reference_bbox_h = _bbox_size_np(points)
+    if max(reference_bbox_w, reference_bbox_h) <= epsilon_mm * 1.5:
+        return loop
+
+    simplified = _rdp_closed_np(points, epsilon=max(1e-9, float(epsilon_mm)))
+    if simplified is None or simplified.shape[0] < 3:
+        return loop
+    simplified = _simplify_collinear_world_np(simplified)
+    if simplified.shape[0] < 3:
+        return loop
+    if not _validate_smoothed_world_loop(
+        reference_bbox_w=reference_bbox_w,
+        reference_bbox_h=reference_bbox_h,
+        reference_area_abs=reference_area_abs,
+        reference_sign=reference_sign,
+        candidate=simplified,
+        area_tolerance_ratio=area_tolerance_ratio,
+        bbox_tolerance_ratio=bbox_tolerance_ratio,
+    ):
+        return loop
+    if simplified.shape[0] >= points.shape[0]:
+        return loop
+    return [(float(point[0]), float(point[1])) for point in simplified]
+
+
+def _dedup_closed_points_np(points: np.ndarray) -> np.ndarray:
+    if points.shape[0] <= 1:
+        return points
+    keep = np.ones(points.shape[0], dtype=bool)
+    keep[1:] = np.any(np.abs(points[1:] - points[:-1]) > 1e-12, axis=1)
+    dedup = points[keep]
+    if dedup.shape[0] > 1 and np.all(np.abs(dedup[0] - dedup[-1]) <= 1e-12):
+        dedup = dedup[:-1]
+    return dedup
+
+
+def _simplify_collinear_world_np(points: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    if points.shape[0] < 3:
+        return points
+    pts = points
+    changed = True
+    while changed and pts.shape[0] >= 3:
+        changed = False
+        size = int(pts.shape[0])
+        keep = np.ones(size, dtype=bool)
+        for idx in range(size):
+            prev = pts[(idx - 1) % size]
+            curr = pts[idx]
+            nxt = pts[(idx + 1) % size]
+            cross = (curr[0] - prev[0]) * (nxt[1] - curr[1]) - (curr[1] - prev[1]) * (nxt[0] - curr[0])
+            if abs(float(cross)) <= eps:
+                keep[idx] = False
+                changed = True
+        reduced = pts[keep]
+        if reduced.shape[0] < 3:
+            return np.empty((0, 2), dtype=np.float64)
+        pts = reduced
+    return pts
+
+
+def _rdp_closed_np(points: np.ndarray, *, epsilon: float) -> np.ndarray | None:
+    if points.shape[0] < 3:
+        return points
+    anchor = int(np.argmin(points[:, 0] * 1_000_000.0 + points[:, 1]))
+    rotated = np.concatenate([points[anchor:], points[:anchor], points[anchor : anchor + 1]], axis=0)
+    simplified_open = _rdp_open_np(rotated, epsilon=epsilon)
+    if simplified_open.shape[0] < 4:
+        return None
+    closed = simplified_open[:-1]
+    return _dedup_closed_points_np(closed)
+
+
+def _rdp_open_np(points: np.ndarray, *, epsilon: float) -> np.ndarray:
+    count = int(points.shape[0])
+    if count <= 2:
+        return points
+    keep = np.zeros(count, dtype=bool)
+    keep[0] = True
+    keep[-1] = True
+    stack: list[tuple[int, int]] = [(0, count - 1)]
+    while stack:
+        start, end = stack.pop()
+        if end <= (start + 1):
+            continue
+        segment = points[start : end + 1]
+        max_index, max_distance = _max_distance_to_segment_np(segment, epsilon=epsilon)
+        if max_index < 0 or max_distance <= epsilon:
+            continue
+        split = start + max_index
+        keep[split] = True
+        stack.append((start, split))
+        stack.append((split, end))
+    return points[keep]
+
+
+def _max_distance_to_segment_np(segment: np.ndarray, *, epsilon: float) -> tuple[int, float]:
+    if segment.shape[0] <= 2:
+        return (-1, 0.0)
+    start = segment[0]
+    end = segment[-1]
+    vec = end - start
+    denom = float(np.dot(vec, vec))
+    interior = segment[1:-1]
+    if interior.shape[0] == 0:
+        return (-1, 0.0)
+    if denom <= max(1e-18, epsilon * epsilon):
+        distances = np.linalg.norm(interior - start, axis=1)
+    else:
+        t = np.clip(np.dot(interior - start, vec) / denom, 0.0, 1.0)
+        projection = start + np.outer(t, vec)
+        distances = np.linalg.norm(interior - projection, axis=1)
+    max_pos = int(np.argmax(distances))
+    return (max_pos + 1, float(distances[max_pos]))
 
 
 def _bbox_size_np(points: np.ndarray) -> tuple[float, float]:

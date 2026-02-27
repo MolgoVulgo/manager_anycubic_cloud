@@ -12,6 +12,7 @@ from typing import Callable
 import numpy as np
 
 from accloud_core.logging_contract import emit_event, get_op_id
+from render3d_core.parallel_policy import uses_python_fanout
 from render3d_core.perf import BuildMetrics
 from render3d_core.task_runner import CancelledError
 from render3d_core.types import LayerLoops, LayerRange, Point2D, PwmbContourGeometry, PwmbContourStack
@@ -30,6 +31,9 @@ class _LayerGeometryBuild:
     line_vertices: list[Point3DLayer]
     point_vertices: list[Point3DLayer]
     task_ms: float
+    triangulate_ms: float
+    wireframe_ms: float
+    triangle_count: int
 
 
 def build_geometry_v2(
@@ -105,53 +109,57 @@ def build_geometry_v2(
         if metrics is not None:
             metrics.triangulation_workers_effective = worker_count if use_parallel else 1
         triangulation_task_ms = 0.0
+        triangulate_fill_task_ms = 0.0
+        wireframe_task_ms = 0.0
 
         if use_parallel:
             chunks_by_layer: dict[int, _LayerGeometryBuild] = {}
+            layer_jobs: list[tuple[int, LayerLoops, float]] = []
+            for layer_id in layer_ids:
+                layer_loops = stack.layers.get(layer_id)
+                if layer_loops is None:
+                    continue
+                z = (float(layer_id) - z_center) * float(stack.pitch_z_mm)
+                layer_jobs.append((int(layer_id), layer_loops, z))
+            chunk_size = _resolve_chunk_size(
+                worker_count=worker_count,
+                layer_count=len(layer_jobs),
+                env_name="RENDER3D_GEOMETRY_CHUNK_SIZE",
+            )
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                future_map = {}
-                for layer_id in layer_ids:
+                pending = []
+                for layer_chunk in _iter_layer_geometry_chunks(layer_jobs, chunk_size=chunk_size):
                     _raise_if_cancelled(cancel_token)
-                    layer_loops = stack.layers.get(layer_id)
-                    if layer_loops is None:
-                        continue
-                    z = (float(layer_id) - z_center) * float(stack.pitch_z_mm)
                     future = executor.submit(
-                        _build_layer_geometry,
-                        layer_id=layer_id,
-                        layer_loops=layer_loops,
-                        z=z,
+                        _build_layer_geometry_chunk,
+                        layer_jobs=layer_chunk,
                         stride=stride,
                         include_fill=include_fill,
                         triangulator=triangulator,
                         cancel_token=cancel_token,
                     )
-                    future_map[future] = layer_id
+                    pending.append(future)
 
-                for future in as_completed(future_map):
+                for future in as_completed(pending):
                     _raise_if_cancelled(cancel_token)
-                    chunk = future.result()
-                    chunks_by_layer[chunk.layer_id] = chunk
-                    triangulation_task_ms += float(chunk.task_ms)
+                    chunk_results = future.result()
+                    for chunk in chunk_results:
+                        chunks_by_layer[int(chunk.layer_id)] = chunk
+                        triangulation_task_ms += float(chunk.task_ms)
+                        triangulate_fill_task_ms += float(chunk.triangulate_ms)
+                        wireframe_task_ms += float(chunk.wireframe_ms)
+                        if metrics is not None:
+                            metrics.triangles_per_layer_max = max(
+                                int(metrics.triangles_per_layer_max),
+                                int(chunk.triangle_count),
+                            )
 
-            for layer_id in layer_ids:
-                chunk = chunks_by_layer.get(layer_id)
-                if chunk is None:
-                    continue
-                tri_start = len(geometry.triangle_vertices)
-                tri_count = len(chunk.triangle_vertices)
-                geometry.triangle_vertices.extend(chunk.triangle_vertices)
-                geometry.tri_range[layer_id] = LayerRange(start=tri_start, count=tri_count)
-
-                line_start = len(geometry.line_vertices)
-                line_count = len(chunk.line_vertices)
-                geometry.line_vertices.extend(chunk.line_vertices)
-                geometry.line_range[layer_id] = LayerRange(start=line_start, count=line_count)
-
-                point_start = len(geometry.point_vertices)
-                point_count = len(chunk.point_vertices)
-                geometry.point_vertices.extend(chunk.point_vertices)
-                geometry.point_range[layer_id] = LayerRange(start=point_start, count=point_count)
+            _assemble_geometry_from_layer_chunks(
+                geometry=geometry,
+                layer_ids=layer_ids,
+                chunks_by_layer=chunks_by_layer,
+                metrics=metrics,
+            )
         else:
             stop_all = False
             for layer_id in layer_ids:
@@ -166,6 +174,8 @@ def build_geometry_v2(
                 outer_loops = [loop for loop in outer_loops if len(loop) >= 3 and abs(_signed_area(loop)) > 1e-12]
                 hole_loops = [loop for loop in hole_loops if len(loop) >= 3 and abs(_signed_area(loop)) > 1e-12]
 
+                layer_start = perf_counter()
+                triangulate_start = perf_counter()
                 tri_start = len(geometry.triangle_vertices)
                 tri_count = 0
                 if include_fill:
@@ -194,7 +204,9 @@ def build_geometry_v2(
                         if stop_all:
                             break
                 geometry.tri_range[layer_id] = LayerRange(start=tri_start, count=tri_count)
+                triangulate_elapsed_ms = (perf_counter() - triangulate_start) * 1000.0
 
+                wireframe_start = perf_counter()
                 line_start = len(geometry.line_vertices)
                 line_count = 0
                 point_start = len(geometry.point_vertices)
@@ -226,6 +238,16 @@ def build_geometry_v2(
 
                 geometry.line_range[layer_id] = LayerRange(start=line_start, count=line_count)
                 geometry.point_range[layer_id] = LayerRange(start=point_start, count=point_count)
+                wireframe_elapsed_ms = (perf_counter() - wireframe_start) * 1000.0
+                layer_elapsed_ms = (perf_counter() - layer_start) * 1000.0
+                triangulation_task_ms += layer_elapsed_ms
+                triangulate_fill_task_ms += triangulate_elapsed_ms
+                wireframe_task_ms += wireframe_elapsed_ms
+                if metrics is not None:
+                    metrics.triangles_per_layer_max = max(
+                        int(metrics.triangles_per_layer_max),
+                        int(tri_count // 3),
+                    )
 
                 if stop_all:
                     break
@@ -233,9 +255,11 @@ def build_geometry_v2(
         triangulation_wall_ms = (perf_counter() - start_ms) * 1000.0
         if metrics is not None:
             if not use_parallel:
-                triangulation_task_ms = triangulation_wall_ms
+                triangulation_task_ms = max(float(triangulation_task_ms), float(triangulation_wall_ms))
             metrics.triangulation_ms_total += triangulation_task_ms
             metrics.triangulation_wall_ms += triangulation_wall_ms
+            metrics.triangulate_fill_ms_total += triangulate_fill_task_ms
+            metrics.wireframe_ms_total += wireframe_task_ms
         _finalize_contiguous_buffers(geometry, metrics=metrics)
         if metrics is not None:
             metrics.triangles_total = len(geometry.triangle_vertices) // 3
@@ -366,6 +390,8 @@ def _resolve_worker_count(
     layer_count = len(layer_ids)
     if layer_count <= 1:
         return 1
+    if not uses_python_fanout():
+        return 1
     requested = 1
     if metrics is not None:
         try:
@@ -391,6 +417,103 @@ def _parse_worker_cap_env(name: str) -> int | None:
     return max(1, parsed)
 
 
+def _resolve_chunk_size(*, worker_count: int, layer_count: int, env_name: str) -> int:
+    if layer_count <= 1:
+        return 1
+    env_chunk = _parse_worker_cap_env(env_name)
+    if env_chunk is not None:
+        return max(1, min(layer_count, int(env_chunk)))
+    target_chunks = max(1, int(worker_count) * 2)
+    baseline = int(math.ceil(float(layer_count) / float(target_chunks)))
+    tuned = max(8, min(32, baseline))
+    return max(1, min(layer_count, tuned))
+
+
+def _iter_layer_geometry_chunks(
+    layer_jobs: list[tuple[int, LayerLoops, float]],
+    *,
+    chunk_size: int,
+) -> list[list[tuple[int, LayerLoops, float]]]:
+    size = max(1, int(chunk_size))
+    return [layer_jobs[start : start + size] for start in range(0, len(layer_jobs), size)]
+
+
+def _build_layer_geometry_chunk(
+    *,
+    layer_jobs: list[tuple[int, LayerLoops, float]],
+    stride: int,
+    include_fill: bool,
+    triangulator: Callable[[list[Point2D], list[list[Point2D]]], TriangulationResult] | None,
+    cancel_token: object | None,
+) -> list[_LayerGeometryBuild]:
+    results: list[_LayerGeometryBuild] = []
+    for layer_id, layer_loops, z in layer_jobs:
+        _raise_if_cancelled(cancel_token)
+        results.append(
+            _build_layer_geometry(
+                layer_id=int(layer_id),
+                layer_loops=layer_loops,
+                z=float(z),
+                stride=stride,
+                include_fill=include_fill,
+                triangulator=triangulator,
+                cancel_token=cancel_token,
+            )
+        )
+    return results
+
+
+def _assemble_geometry_from_layer_chunks(
+    *,
+    geometry: PwmbContourGeometry,
+    layer_ids: list[int],
+    chunks_by_layer: dict[int, _LayerGeometryBuild],
+    metrics: BuildMetrics | None = None,
+) -> None:
+    ordered = [chunks_by_layer[layer_id] for layer_id in layer_ids if layer_id in chunks_by_layer]
+    total_tri = sum(len(chunk.triangle_vertices) for chunk in ordered)
+    total_line = sum(len(chunk.line_vertices) for chunk in ordered)
+    total_point = sum(len(chunk.point_vertices) for chunk in ordered)
+
+    tri_arr = np.empty((total_tri, 4), dtype=np.float32)
+    line_arr = np.empty((total_line, 4), dtype=np.float32)
+    point_arr = np.empty((total_point, 4), dtype=np.float32)
+
+    tri_offset = 0
+    line_offset = 0
+    point_offset = 0
+    for chunk in ordered:
+        layer_id = int(chunk.layer_id)
+        tri_count = len(chunk.triangle_vertices)
+        line_count = len(chunk.line_vertices)
+        point_count = len(chunk.point_vertices)
+
+        geometry.tri_range[layer_id] = LayerRange(start=tri_offset, count=tri_count)
+        geometry.line_range[layer_id] = LayerRange(start=line_offset, count=line_count)
+        geometry.point_range[layer_id] = LayerRange(start=point_offset, count=point_count)
+
+        if tri_count > 0:
+            tri_arr[tri_offset : tri_offset + tri_count, :] = _as_contiguous_vertices(chunk.triangle_vertices)
+            if metrics is not None:
+                metrics.buffer_copy_ops += 1
+        if line_count > 0:
+            line_arr[line_offset : line_offset + line_count, :] = _as_contiguous_vertices(chunk.line_vertices)
+            if metrics is not None:
+                metrics.buffer_copy_ops += 1
+        if point_count > 0:
+            point_arr[point_offset : point_offset + point_count, :] = _as_contiguous_vertices(chunk.point_vertices)
+            if metrics is not None:
+                metrics.buffer_copy_ops += 1
+
+        tri_offset += tri_count
+        line_offset += line_count
+        point_offset += point_count
+
+    geometry.triangle_vertices = tri_arr
+    geometry.line_vertices = line_arr
+    geometry.point_vertices = point_arr
+
+
 def _build_layer_geometry(
     *,
     layer_id: int,
@@ -408,6 +531,7 @@ def _build_layer_geometry(
     outer_loops = [loop for loop in outer_loops if len(loop) >= 3 and abs(_signed_area(loop)) > 1e-12]
     hole_loops = [loop for loop in hole_loops if len(loop) >= 3 and abs(_signed_area(loop)) > 1e-12]
 
+    triangulate_start = perf_counter()
     tri_vertices: list[Point3DLayer] = []
     if include_fill:
         hole_map = _assign_holes_to_outers(outer_loops, hole_loops)
@@ -428,7 +552,9 @@ def _build_layer_geometry(
                         _to_point4(c, z, layer_id),
                     ]
                 )
+    triangulate_elapsed_ms = (perf_counter() - triangulate_start) * 1000.0
 
+    wireframe_start = perf_counter()
     line_vertices: list[Point3DLayer] = []
     point_vertices: list[Point3DLayer] = []
     for loop in [*outer_loops, *hole_loops]:
@@ -443,6 +569,7 @@ def _build_layer_geometry(
         for point in loop:
             _raise_if_cancelled(cancel_token)
             point_vertices.append(_to_point4(point, z, layer_id))
+    wireframe_elapsed_ms = (perf_counter() - wireframe_start) * 1000.0
 
     return _LayerGeometryBuild(
         layer_id=int(layer_id),
@@ -450,6 +577,9 @@ def _build_layer_geometry(
         line_vertices=line_vertices,
         point_vertices=point_vertices,
         task_ms=(perf_counter() - start_ts) * 1000.0,
+        triangulate_ms=triangulate_elapsed_ms,
+        wireframe_ms=wireframe_elapsed_ms,
+        triangle_count=len(tri_vertices) // 3,
     )
 
 
@@ -504,9 +634,12 @@ def _triangles_from_indexed_payload(payload: dict[str, np.ndarray]) -> list[Tria
 
 def _finalize_contiguous_buffers(geometry: PwmbContourGeometry, *, metrics: BuildMetrics | None) -> None:
     start = perf_counter()
-    tri = _as_contiguous_vertices(geometry.triangle_vertices)
-    line = _as_contiguous_vertices(geometry.line_vertices)
-    point = _as_contiguous_vertices(geometry.point_vertices)
+    tri_src = geometry.triangle_vertices
+    line_src = geometry.line_vertices
+    point_src = geometry.point_vertices
+    tri = _as_contiguous_vertices(tri_src)
+    line = _as_contiguous_vertices(line_src)
+    point = _as_contiguous_vertices(point_src)
     geometry.triangle_vertices = tri
     geometry.line_vertices = line
     geometry.point_vertices = point
@@ -514,7 +647,25 @@ def _finalize_contiguous_buffers(geometry: PwmbContourGeometry, *, metrics: Buil
     geometry.line_indices = _sequential_indices(int(line.shape[0]), width=2)
     geometry.point_indices = _sequential_indices(int(point.shape[0]), width=1)
     if metrics is not None:
-        metrics.buffers_ms_total += (perf_counter() - start) * 1000.0
+        elapsed_ms = (perf_counter() - start) * 1000.0
+        metrics.buffers_ms_total += elapsed_ms
+        metrics.finalize_buffers_ms_total += elapsed_ms
+        if not _is_contiguous_vertices_layout(tri_src):
+            metrics.buffer_copy_ops += 1
+        if not _is_contiguous_vertices_layout(line_src):
+            metrics.buffer_copy_ops += 1
+        if not _is_contiguous_vertices_layout(point_src):
+            metrics.buffer_copy_ops += 1
+        # Index buffers are freshly allocated in finalize.
+        metrics.buffer_copy_ops += 3
+        metrics.bytes_allocated_estimated += int(
+            tri.nbytes
+            + line.nbytes
+            + point.nbytes
+            + geometry.triangle_indices.nbytes
+            + geometry.line_indices.nbytes
+            + geometry.point_indices.nbytes
+        )
 
 
 def _as_contiguous_vertices(vertices: list[Point3DLayer] | np.ndarray) -> np.ndarray:
@@ -532,6 +683,16 @@ def _as_contiguous_vertices(vertices: list[Point3DLayer] | np.ndarray) -> np.nda
     elif arr.ndim != 2 or arr.shape[1] != 4:
         arr = arr.reshape((-1, 4))
     return np.ascontiguousarray(arr, dtype=np.float32)
+
+
+def _is_contiguous_vertices_layout(vertices: object) -> bool:
+    if not isinstance(vertices, np.ndarray):
+        return False
+    if vertices.dtype != np.float32:
+        return False
+    if vertices.ndim != 2 or vertices.shape[1] != 4:
+        return False
+    return bool(vertices.flags["C_CONTIGUOUS"])
 
 
 def _sequential_indices(vertex_count: int, *, width: int) -> np.ndarray:

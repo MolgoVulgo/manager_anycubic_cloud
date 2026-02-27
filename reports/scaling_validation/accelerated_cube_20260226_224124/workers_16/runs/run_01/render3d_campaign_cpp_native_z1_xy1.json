@@ -1,0 +1,109 @@
+{
+  "backend_requested": "cpp",
+  "workers_requested": 16,
+  "workers_effective": 16,
+  "files_total": 1,
+  "results": [
+    {
+      "file": "/home/kaj/Develop/python/manager_anycubic_cloud/pwmb_files/cube.pwmb",
+      "file_signature": "size=2292920:mtime=1771666298614342397:sha1=f7a1a9dea0d2290f3f87d3abc0ee4b54e4aee5fc",
+      "backend": "cpp",
+      "threshold": 1,
+      "bin_mode": "index_strict",
+      "xy_stride": 1,
+      "z_stride": 1,
+      "max_layers": null,
+      "max_vertices": null,
+      "max_xy_stride": 1,
+      "metrics": {
+        "parse_ms": 0.678,
+        "decode_ms_total": 113281.287,
+        "mask_build_ms_total": 13601.273,
+        "contour_extract_ms_total": 34504.967,
+        "loop_to_world_ms_total": 1.488,
+        "loop_simplify_ms_total": 0.0,
+        "decode_mb_s": 0.019,
+        "contours_ms_total": 56378.06,
+        "contours_wall_ms": 12696.569,
+        "triangulation_ms_total": 4.156,
+        "triangulate_fill_ms_total": 2.141,
+        "wireframe_ms_total": 0.788,
+        "triangulation_wall_ms": 9.575,
+        "contour_stage_parallelism": 13.363,
+        "triangulation_parallelism": 0.434,
+        "buffers_ms_total": 0.042,
+        "finalize_buffers_ms_total": 0.042,
+        "layers_total": 200,
+        "layers_built": 200,
+        "layers_skipped": 0,
+        "layers_simplified": 0,
+        "loops_total": 200,
+        "vertices_total": 3600,
+        "triangles_total": 400,
+        "points_before_simplify_total": 0,
+        "points_after_simplify_total": 0,
+        "points_before_simplify_max": 0,
+        "points_after_simplify_max": 0,
+        "triangles_per_layer_max": 2,
+        "bytes_allocated_estimated": 72000,
+        "buffer_concat_ops": 0,
+        "buffer_copy_ops": 603,
+        "stage_breakdown_ms": {
+          "decode_layer": 113281.287,
+          "mask_build": 13601.273,
+          "contour_extract": 34504.967,
+          "loop_to_world": 1.488,
+          "loop_simplify": 0.0,
+          "triangulate": 2.141,
+          "wireframe": 0.788,
+          "finalize_buffers": 0.042
+        },
+        "top3_steps": [
+          {
+            "stage": "decode_layer",
+            "ms": 113281.287
+          },
+          {
+            "stage": "contour_extract",
+            "ms": 34504.967
+          },
+          {
+            "stage": "mask_build",
+            "ms": 13601.273
+          }
+        ],
+        "pool_kind": "threads",
+        "workers": 16,
+        "contours_workers_effective": 16,
+        "triangulation_workers_effective": 16
+      },
+      "invariants": {
+        "contour_area_mm2": 19904.116966,
+        "mesh_area_mm2": 19904.118347,
+        "contour_bbox": [
+          -5.0568002243042,
+          -4.988000221252442,
+          4.919200218200684,
+          4.988000221252442
+        ],
+        "mesh_bbox": [
+          -5.056800365447998,
+          -4.988000392913818,
+          -4.974999904632568,
+          4.919200420379639,
+          4.988000392913818,
+          4.974999904632568
+        ],
+        "triangle_count": 400,
+        "degenerate_triangles": 0
+      },
+      "cpp_contours_impl_requested": "native",
+      "cpp_contours_impl_effective": "native",
+      "cpp_opencv_approx_requested": null,
+      "cpp_opencv_approx_effective": "simple",
+      "parallel_policy_requested": "python_fanout",
+      "parallel_policy_effective": "python_fanout"
+    }
+  ],
+  "errors": []
+}

@@ -18,7 +18,7 @@ GEOM_CPP_OPENCV_APPROX_ENV = "GEOM_CPP_OPENCV_APPROX"
 GEOM_CPP_TRIANGULATION_IMPL_ENV = "GEOM_CPP_TRIANGULATION_IMPL"
 _VALID_CONTOUR_IMPLS = {"native", "opencv", "auto"}
 _VALID_OPENCV_APPROX = {"simple", "tc89_l1", "tc89_kcos"}
-_VALID_TRIANGULATION_IMPLS = {"native", "python", "auto"}
+_VALID_TRIANGULATION_IMPLS = {"native", "auto"}
 _WARNED_KEYS: set[str] = set()
 
 try:
@@ -132,6 +132,10 @@ def has_native_indexed_triangulation() -> bool:
 def current_triangulation_impl() -> str:
     raw_value = os.getenv(GEOM_CPP_TRIANGULATION_IMPL_ENV, "native")
     requested = str(raw_value).strip().lower() or "native"
+    if requested == "python":
+        raise RuntimeError(
+            "GEOM_CPP_TRIANGULATION_IMPL=python is no longer supported for render3d. Use native.",
+        )
     if requested not in _VALID_TRIANGULATION_IMPLS:
         _warn_once(
             "invalid_cpp_triangulation_impl",
@@ -141,14 +145,11 @@ def current_triangulation_impl() -> str:
         )
         requested = "native"
     if requested == "auto":
-        return "native" if has_native_triangulation() else "python"
+        requested = "native"
     if requested == "native" and not has_native_triangulation():
-        _warn_once(
-            "native_triangulation_unavailable",
-            "%s=native requested but native triangulation is unavailable, fallback to python",
-            GEOM_CPP_TRIANGULATION_IMPL_ENV,
+        raise RuntimeError(
+            f"{GEOM_CPP_TRIANGULATION_IMPL_ENV}=native requested but native triangulation is unavailable."
         )
-        return "python"
     return requested
 
 
@@ -185,7 +186,11 @@ def build_geometry(
     cancel_token: object | None = None,
 ) -> PwmbContourGeometry:
     triangulation_impl = current_triangulation_impl()
-    triangulator = _triangulate_native_polygon_with_holes if triangulation_impl == "native" else None
+    if triangulation_impl != "native":
+        raise RuntimeError(f"Unsupported triangulation impl: {triangulation_impl!r}")
+    if not has_native_triangulation():
+        raise RuntimeError("pwmb_geom native triangulation is unavailable.")
+    triangulator = _triangulate_native_polygon_with_holes
     return build_geometry_v2(
         contour_stack,
         max_layers=max_layers,

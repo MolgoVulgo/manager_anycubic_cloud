@@ -12,6 +12,7 @@ from app_gui_qt.dialogs.pwmb3d_dialog import (
     _pan_center_for_drag,
     _quality_ratio_from_index,
     _select_preview_xy_stride_for_quality,
+    _select_preview_simplify_epsilon_mm,
     _sample_layers_by_ratio,
     _select_preview_xy_stride,
     _select_preview_xy_stride_for_complexity,
@@ -103,17 +104,33 @@ def test_perf_metrics_export_log_dicts() -> None:
     build = BuildMetrics(
         parse_ms=1.2,
         decode_ms_total=3.4,
+        mask_build_ms_total=0.8,
+        contour_extract_ms_total=1.1,
+        loop_to_world_ms_total=0.7,
+        loop_simplify_ms_total=0.6,
         decode_mb_s=12.3,
         contours_ms_total=5.6,
         contours_wall_ms=2.8,
         triangulation_ms_total=7.8,
+        triangulate_fill_ms_total=4.5,
+        wireframe_ms_total=2.1,
         triangulation_wall_ms=3.9,
+        finalize_buffers_ms_total=1.4,
         layers_total=10,
         layers_built=8,
         layers_skipped=2,
+        layers_simplified=6,
         loops_total=40,
         vertices_total=100,
         triangles_total=25,
+        points_before_simplify_total=500,
+        points_after_simplify_total=170,
+        points_before_simplify_max=90,
+        points_after_simplify_max=38,
+        triangles_per_layer_max=18,
+        bytes_allocated_estimated=2048,
+        buffer_concat_ops=0,
+        buffer_copy_ops=11,
         pool_kind="threads",
         workers=4,
     )
@@ -140,6 +157,16 @@ def test_perf_metrics_export_log_dicts() -> None:
     assert build_data["triangulation_wall_ms"] == pytest.approx(3.9, rel=1e-6)
     assert build_data["contour_stage_parallelism"] == pytest.approx(round((3.4 + 5.6) / 2.8, 3), rel=1e-6)
     assert build_data["triangulation_parallelism"] == pytest.approx(2.0, rel=1e-6)
+    assert build_data["stage_breakdown_ms"]["mask_build"] == pytest.approx(0.8, rel=1e-6)
+    assert build_data["stage_breakdown_ms"]["triangulate"] == pytest.approx(4.5, rel=1e-6)
+    assert build_data["stage_breakdown_ms"]["finalize_buffers"] == pytest.approx(1.4, rel=1e-6)
+    assert build_data["layers_simplified"] == 6
+    assert build_data["points_before_simplify_total"] == 500
+    assert build_data["points_after_simplify_total"] == 170
+    assert build_data["triangles_per_layer_max"] == 18
+    assert build_data["bytes_allocated_estimated"] == 2048
+    assert build_data["buffer_copy_ops"] == 11
+    assert len(build_data["top3_steps"]) == 3
     assert build_data["contours_workers_effective"] == 1
     assert build_data["triangulation_workers_effective"] == 1
     assert gpu_data["vbo_bytes_tri"] == 1000
@@ -188,6 +215,33 @@ def test_select_preview_xy_stride_for_quality_keeps_adaptive_stride_below_100_pe
         )
         == 6
     )
+
+
+def test_select_preview_simplify_epsilon_mm_quality_controls_aggressiveness() -> None:
+    eps_quality = _select_preview_simplify_epsilon_mm(
+        width=5760,
+        height=3600,
+        layer_count=585,
+        pixel_size_um=50.0,
+        quality_ratio=1.0,
+    )
+    eps_preview = _select_preview_simplify_epsilon_mm(
+        width=5760,
+        height=3600,
+        layer_count=585,
+        pixel_size_um=50.0,
+        quality_ratio=0.66,
+    )
+    eps_low = _select_preview_simplify_epsilon_mm(
+        width=5760,
+        height=3600,
+        layer_count=585,
+        pixel_size_um=50.0,
+        quality_ratio=0.33,
+    )
+    assert eps_quality == pytest.approx(0.0, abs=1e-12)
+    assert eps_preview > eps_quality
+    assert eps_low > eps_preview
 
 
 def test_select_preview_z_stride_scales_for_heavy_complexity() -> None:

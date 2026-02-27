@@ -9,7 +9,14 @@ import pytest
 
 from accloud_core.logging_contract import JsonLineFormatter, operation_context
 from pwmb_core.types import HeaderInfo, LayerDef, MachineInfo, PwmbDocument
-from render3d_core.contours import PixelLayerLoops, build_contour_stack, smooth_contour_stack_preview
+import render3d_core.contours as contours_mod
+import render3d_core.geometry_v2 as geometry_v2_mod
+from render3d_core.contours import (
+    PixelLayerLoops,
+    build_contour_stack,
+    simplify_contour_stack,
+    smooth_contour_stack_preview,
+)
 from render3d_core.geometry_v2 import build_geometry_v2
 from render3d_core.perf import BuildMetrics
 from render3d_core.task_runner import CancellationToken, CancelledError
@@ -270,6 +277,60 @@ def test_smooth_contour_stack_preview_preserves_area_and_bbox() -> None:
     assert bh_smooth == pytest.approx(bh_ref, rel=0.06)
 
 
+def test_simplify_contour_stack_reduces_points_with_area_guard() -> None:
+    loop: list[tuple[float, float]] = []
+    for idx in range(80):
+        t = (2.0 * np.pi * idx) / 80.0
+        x = float(np.cos(t) * 6.0)
+        y = float(np.sin(t) * 3.0)
+        loop.append((x, y))
+    stack = PwmbContourStack(
+        pitch_x_mm=0.05,
+        pitch_y_mm=0.05,
+        pitch_z_mm=0.05,
+        layers={0: LayerLoops(outer=[loop], holes=[])},
+    )
+    base_area = _stack_area_mm2(stack)
+    simplified = simplify_contour_stack(stack, tolerance_mm=0.35)
+    simplified_loop = simplified.layers[0].outer[0]
+
+    assert len(simplified_loop) < len(loop)
+    assert _stack_area_mm2(simplified) == pytest.approx(base_area, rel=0.20)
+
+
+def test_simplify_contour_stack_zero_tolerance_returns_same_stack() -> None:
+    stack = PwmbContourStack(
+        pitch_x_mm=0.05,
+        pitch_y_mm=0.05,
+        pitch_z_mm=0.05,
+        layers={0: LayerLoops(outer=[[(0.0, 0.0), (2.0, 0.0), (2.0, 1.0), (0.0, 1.0)]], holes=[])},
+    )
+    simplified = simplify_contour_stack(stack, tolerance_mm=0.0)
+    assert simplified is stack
+
+
+def test_simplify_contour_stack_updates_metrics() -> None:
+    loop: list[tuple[float, float]] = []
+    for idx in range(64):
+        t = (2.0 * np.pi * idx) / 64.0
+        loop.append((float(np.cos(t) * 5.0), float(np.sin(t) * 2.0)))
+    stack = PwmbContourStack(
+        pitch_x_mm=0.05,
+        pitch_y_mm=0.05,
+        pitch_z_mm=0.05,
+        layers={0: LayerLoops(outer=[loop], holes=[])},
+    )
+    metrics = BuildMetrics()
+    simplified = simplify_contour_stack(stack, tolerance_mm=0.25, metrics=metrics)
+
+    assert metrics.loop_simplify_ms_total >= 0.0
+    assert metrics.points_before_simplify_total >= len(loop)
+    assert metrics.points_after_simplify_total > 0
+    assert metrics.points_after_simplify_total <= metrics.points_before_simplify_total
+    assert metrics.layers_simplified >= 1
+    assert len(simplified.layers[0].outer[0]) < len(loop)
+
+
 def test_build_contour_stack_accepts_custom_pixel_extractor(monkeypatch: pytest.MonkeyPatch) -> None:
     document = _make_document(width=4, height=4, layers=1)
     decoded = np.asarray(
@@ -448,6 +509,45 @@ def test_build_contour_stack_uses_max_available_workers(monkeypatch: pytest.Monk
     )
 
     assert metrics.contours_workers_effective == 32
+    assert metrics.mask_build_ms_total >= 0.0
+    assert metrics.contour_extract_ms_total >= 0.0
+    assert metrics.loop_to_world_ms_total >= 0.0
+
+
+def test_build_contour_stack_chunk_size_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RENDER3D_CONTOURS_CHUNK_SIZE", "3")
+    chunk_size = contours_mod._resolve_chunk_size(
+        worker_count=32,
+        layer_count=100,
+        env_name="RENDER3D_CONTOURS_CHUNK_SIZE",
+    )
+    assert chunk_size == 3
+
+
+def test_build_contour_stack_cpp_internal_policy_forces_single_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RENDER3D_PARALLEL_POLICY", "cpp_internal")
+    document = _make_document(width=4, height=4, layers=40)
+    decoded = np.asarray(
+        [
+            255, 255, 255, 255,
+            255, 255, 255, 255,
+            255, 255, 255, 255,
+            255, 255, 255, 255,
+        ],
+        dtype=np.uint8,
+    )
+    monkeypatch.setattr("render3d_core.contours.decode_layer", lambda *_args, **_kwargs: decoded)
+    monkeypatch.setattr("render3d_core.contours.decode_layer_index_mask", lambda *_args, **_kwargs: decoded)
+    metrics = BuildMetrics(pool_kind="threads", workers=32)
+
+    _ = build_contour_stack(
+        document,
+        threshold=1,
+        binarization_mode="index_strict",
+        metrics=metrics,
+    )
+
+    assert metrics.contours_workers_effective == 1
 
 
 def test_build_contour_stack_honors_cancellation_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -603,6 +703,9 @@ def test_build_geometry_v2_materializes_contiguous_buffers_and_indices() -> None
     assert geometry.triangle_indices.shape[1] == 3
     assert geometry.line_indices.shape[1] == 2
     assert metrics.buffers_ms_total >= 0.0
+    assert metrics.finalize_buffers_ms_total >= 0.0
+    assert metrics.bytes_allocated_estimated > 0
+    assert metrics.buffer_copy_ops >= 3
 
 
 def test_build_geometry_v2_honors_cancellation_token() -> None:
@@ -666,6 +769,8 @@ def test_build_geometry_v2_parallel_workers_match_single_worker() -> None:
     assert np.array_equal(geometry_parallel.triangle_indices, geometry_single.triangle_indices)
     assert np.array_equal(geometry_parallel.line_indices, geometry_single.line_indices)
     assert np.array_equal(geometry_parallel.point_indices, geometry_single.point_indices)
+    assert metrics_parallel.triangulate_fill_ms_total >= 0.0
+    assert metrics_parallel.wireframe_ms_total >= 0.0
 
 
 def test_build_geometry_v2_uses_max_available_workers() -> None:
@@ -687,6 +792,38 @@ def test_build_geometry_v2_uses_max_available_workers() -> None:
     _ = build_geometry_v2(stack, metrics=metrics)
 
     assert metrics.triangulation_workers_effective == 40
+
+
+def test_build_geometry_v2_chunk_size_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RENDER3D_GEOMETRY_CHUNK_SIZE", "5")
+    chunk_size = geometry_v2_mod._resolve_chunk_size(
+        worker_count=16,
+        layer_count=120,
+        env_name="RENDER3D_GEOMETRY_CHUNK_SIZE",
+    )
+    assert chunk_size == 5
+
+
+def test_build_geometry_v2_cpp_internal_policy_forces_single_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RENDER3D_PARALLEL_POLICY", "cpp_internal")
+    layers = {
+        layer_id: LayerLoops(
+            outer=[[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]],
+            holes=[],
+        )
+        for layer_id in range(8)
+    }
+    stack = PwmbContourStack(
+        pitch_x_mm=0.1,
+        pitch_y_mm=0.1,
+        pitch_z_mm=0.05,
+        layers=layers,
+    )
+    metrics = BuildMetrics(pool_kind="threads", workers=32)
+
+    _ = build_geometry_v2(stack, metrics=metrics)
+
+    assert metrics.triangulation_workers_effective == 1
 
 
 def test_render3d_pipeline_emits_expected_logging_events(monkeypatch: pytest.MonkeyPatch) -> None:

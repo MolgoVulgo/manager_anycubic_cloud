@@ -20,16 +20,6 @@ def _by_file(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _metrics_total(item: dict[str, Any]) -> float:
-    metrics = dict(item.get("metrics", {}))
-    return (
-        float(metrics.get("decode_ms_total", 0.0))
-        + float(metrics.get("contours_ms_total", 0.0))
-        + float(metrics.get("triangulation_ms_total", 0.0))
-        + float(metrics.get("buffers_ms_total", 0.0))
-    )
-
-
 def _aggregate(report: dict[str, Any]) -> dict[str, float]:
     totals = {
         "decode_ms_total": 0.0,
@@ -84,7 +74,6 @@ def _build_variant_delta(
         )
         tri_abs_sum += abs(int(variant_inv.get("triangle_count", 0)) - int(base_inv.get("triangle_count", 0)))
 
-    # Lower score is better (parity-first weighting).
     score = (mesh_area_abs_sum * 10.0) + (contour_area_abs_sum * 8.0) + float(tri_abs_sum)
     return {
         "files": len(files),
@@ -97,40 +86,33 @@ def _build_variant_delta(
 
 def _build_summary(
     *,
-    py_report: dict[str, Any],
     cpp_native_report: dict[str, Any],
     opencv_reports: list[dict[str, Any]],
     opencv_fallback_labels: list[str],
 ) -> dict[str, Any]:
-    py_by = _by_file(py_report)
     native_by = _by_file(cpp_native_report)
+    native_agg = _aggregate(cpp_native_report)
 
     variants: list[dict[str, Any]] = []
     for idx, report in enumerate(opencv_reports):
         label = _variant_label(report, opencv_fallback_labels[idx])
         by_file = _by_file(report)
         agg = _aggregate(report)
-        vs_python = _build_variant_delta(base=py_by, variant=by_file)
         vs_native = _build_variant_delta(base=native_by, variant=by_file)
         variants.append(
             {
                 "label": label,
                 "aggregate": agg,
-                "speedup_vs_python_total_x": (float(_aggregate(py_report)["total_ms"]) / agg["total_ms"])
+                "speedup_vs_cpp_native_total_x": (float(native_agg["total_ms"]) / agg["total_ms"])
                 if agg["total_ms"] > 0
                 else None,
-                "speedup_vs_cpp_native_total_x": (float(_aggregate(cpp_native_report)["total_ms"]) / agg["total_ms"])
-                if agg["total_ms"] > 0
-                else None,
-                "delta_vs_python": vs_python,
                 "delta_vs_cpp_native": vs_native,
             }
         )
 
-    # Decision: parity-first then runtime.
     scored = []
     for variant in variants:
-        delta = dict(variant.get("delta_vs_python", {}))
+        delta = dict(variant.get("delta_vs_cpp_native", {}))
         score = delta.get("score")
         total_ms = float(dict(variant.get("aggregate", {})).get("total_ms", 0.0))
         if score is None:
@@ -141,19 +123,17 @@ def _build_summary(
 
     return {
         "aggregate": {
-            "python": _aggregate(py_report),
-            "cpp_native": _aggregate(cpp_native_report),
+            "cpp_native": native_agg,
             "opencv_variants": variants,
         },
         "recommended_opencv_approx": recommended,
-        "decision_basis": "min(delta_vs_python.score), tie-break on total_ms",
+        "decision_basis": "min(delta_vs_cpp_native.score), tie-break on total_ms",
     }
 
 
 def _write_markdown(path: Path, summary: dict[str, Any]) -> None:
     agg = dict(summary.get("aggregate", {}))
     variants = list(agg.get("opencv_variants", []))
-    py = dict(agg.get("python", {}))
     native = dict(agg.get("cpp_native", {}))
 
     lines: list[str] = []
@@ -163,10 +143,6 @@ def _write_markdown(path: Path, summary: dict[str, Any]) -> None:
     lines.append("")
     lines.append("| backend | decode | contours | triangulation | buffers | total |")
     lines.append("|---|---:|---:|---:|---:|---:|")
-    lines.append(
-        f"| python | {py.get('decode_ms_total', 0.0):.3f} | {py.get('contours_ms_total', 0.0):.3f} | "
-        f"{py.get('triangulation_ms_total', 0.0):.3f} | {py.get('buffers_ms_total', 0.0):.3f} | {py.get('total_ms', 0.0):.3f} |"
-    )
     lines.append(
         f"| cpp_native | {native.get('decode_ms_total', 0.0):.3f} | {native.get('contours_ms_total', 0.0):.3f} | "
         f"{native.get('triangulation_ms_total', 0.0):.3f} | {native.get('buffers_ms_total', 0.0):.3f} | {native.get('total_ms', 0.0):.3f} |"
@@ -179,13 +155,13 @@ def _write_markdown(path: Path, summary: dict[str, Any]) -> None:
             f"{item.get('triangulation_ms_total', 0.0):.3f} | {item.get('buffers_ms_total', 0.0):.3f} | {item.get('total_ms', 0.0):.3f} |"
         )
     lines.append("")
-    lines.append("## Parity vs python")
+    lines.append("## Parity vs cpp_native")
     lines.append("")
     lines.append("| opencv approx | files | mesh_area_abs_sum | contour_area_abs_sum | tri_abs_sum | score |")
     lines.append("|---|---:|---:|---:|---:|---:|")
     for variant in variants:
         label = str(variant.get("label", "opencv"))
-        delta = dict(variant.get("delta_vs_python", {}))
+        delta = dict(variant.get("delta_vs_cpp_native", {}))
         lines.append(
             f"| {label} | {int(delta.get('files', 0))} | "
             f"{float(delta.get('mesh_area_abs_sum', 0.0)):.6f} | "
@@ -204,7 +180,6 @@ def _write_markdown(path: Path, summary: dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Summarize OpenCV approximation campaigns.")
-    parser.add_argument("--python-report", type=Path, required=True)
     parser.add_argument("--cpp-native-report", type=Path, required=True)
     parser.add_argument(
         "--cpp-opencv-report",
@@ -224,11 +199,9 @@ def main() -> int:
     if len(args.cpp_opencv_report) != len(args.opencv_label):
         raise SystemExit("--cpp-opencv-report and --opencv-label must have identical counts")
 
-    py_report = _load_json(args.python_report)
     cpp_native_report = _load_json(args.cpp_native_report)
     opencv_reports = [_load_json(Path(p)) for p in args.cpp_opencv_report]
     summary = _build_summary(
-        py_report=py_report,
         cpp_native_report=cpp_native_report,
         opencv_reports=opencv_reports,
         opencv_fallback_labels=[str(x) for x in args.opencv_label],

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pwmb_core.types import PwmbDocument
 from render3d_core.backend import GeometryBackend, get_geometry_backend
 from render3d_core.cache import BuildCache, CacheKey, compute_file_signature, make_cache_key
-from render3d_core.contours import smooth_contour_stack_preview
+from render3d_core.contours import simplify_contour_stack, smooth_contour_stack_preview
 from render3d_core.perf import BuildMetrics
 from render3d_core.types import PwmbContourGeometry, PwmbContourStack
 
@@ -48,6 +48,7 @@ def build_geometry_pipeline(
     _raise_if_cancelled(cancel_token)
     selected_backend = backend or get_geometry_backend()
     effective_z_stride = max(1, int(z_stride))
+    simplify_tol = max(0.0, float(simplify_epsilon))
     extractor_name = str(contour_extractor).strip().lower() or "pixel_edges"
     extractor_suffix = f"_ce_{extractor_name}" if extractor_name != "pixel_edges" else ""
     smoothing_passes = max(0, int(contour_smoothing_iterations))
@@ -60,7 +61,7 @@ def build_geometry_pipeline(
         bin_mode=bin_mode,
         xy_stride=xy_stride,
         z_stride=effective_z_stride,
-        simplify_epsilon=simplify_epsilon,
+        simplify_epsilon=0.0,
         max_layers=max_layers,
         max_vertices=max_vertices,
         render_mode=f"contours{extractor_suffix}{smoothing_suffix}",
@@ -77,7 +78,7 @@ def build_geometry_pipeline(
         bin_mode=bin_mode,
         xy_stride=xy_stride,
         z_stride=effective_z_stride,
-        simplify_epsilon=simplify_epsilon,
+        simplify_epsilon=simplify_tol,
         max_layers=max_layers,
         max_vertices=max_vertices,
         render_mode=geometry_render_mode,
@@ -117,6 +118,16 @@ def build_geometry_pipeline(
         if cache is not None:
             cache.set_contours(contour_key, contour_stack)
 
+    contour_stack_for_geometry = contour_stack
+    if simplify_tol > 0.0:
+        if stage_cb is not None:
+            stage_cb("simplify")
+        contour_stack_for_geometry = simplify_contour_stack(
+            contour_stack_for_geometry,
+            tolerance_mm=simplify_tol,
+            metrics=metrics,
+        )
+
     geometry: PwmbContourGeometry | None = None
     geometry_cache_hit = False
     if cache is not None:
@@ -132,7 +143,7 @@ def build_geometry_pipeline(
         if stage_cb is not None:
             stage_cb("geometry")
         geometry = selected_backend.build_geometry(
-            contour_stack,
+            contour_stack_for_geometry,
             max_layers=max_layers,
             max_vertices=max_vertices,
             max_xy_stride=max_xy_stride,
@@ -145,7 +156,7 @@ def build_geometry_pipeline(
             cache.set_geometry(geometry_key, geometry)
 
     return GeometryBuildResult(
-        contour_stack=contour_stack,
+        contour_stack=contour_stack_for_geometry,
         geometry=geometry,
         backend_name=selected_backend.name,
         file_signature=signature,

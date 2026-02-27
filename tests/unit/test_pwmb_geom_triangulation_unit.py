@@ -56,7 +56,7 @@ def test_native_triangulation_non_axis_aligned_holes_preserves_area() -> None:
     assert all(abs(_triangle_area(tri)) > 1e-12 for tri in triangles)
 
 
-def test_build_geometry_native_triangulation_matches_python_triangulation(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_geometry_native_triangulation_matches_auto(monkeypatch: pytest.MonkeyPatch) -> None:
     stack = PwmbContourStack(
         pitch_x_mm=0.1,
         pitch_y_mm=0.1,
@@ -78,8 +78,8 @@ def test_build_geometry_native_triangulation_matches_python_triangulation(monkey
         include_fill=True,
         metrics=None,
     )
-    monkeypatch.setenv("GEOM_CPP_TRIANGULATION_IMPL", "python")
-    python_geometry = pwmb_geom.build_geometry(
+    monkeypatch.setenv("GEOM_CPP_TRIANGULATION_IMPL", "auto")
+    auto_geometry = pwmb_geom.build_geometry(
         contour_stack=stack,
         max_layers=None,
         max_vertices=None,
@@ -89,10 +89,29 @@ def test_build_geometry_native_triangulation_matches_python_triangulation(monkey
     )
 
     native_inv = build_invariant_snapshot(stack, native_geometry)
-    python_inv = build_invariant_snapshot(stack, python_geometry)
-    assert native_inv.mesh_area_mm2 == pytest.approx(python_inv.mesh_area_mm2, rel=1e-6)
+    auto_inv = build_invariant_snapshot(stack, auto_geometry)
+    assert native_inv.mesh_area_mm2 == pytest.approx(auto_inv.mesh_area_mm2, rel=1e-6)
     assert native_inv.degenerate_triangles == 0
-    assert python_inv.degenerate_triangles == 0
+    assert auto_inv.degenerate_triangles == 0
+
+
+def test_build_geometry_rejects_python_triangulation_impl(monkeypatch: pytest.MonkeyPatch) -> None:
+    stack = PwmbContourStack(
+        pitch_x_mm=0.1,
+        pitch_y_mm=0.1,
+        pitch_z_mm=0.05,
+        layers={0: LayerLoops(outer=[[(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]], holes=[])},
+    )
+    monkeypatch.setenv("GEOM_CPP_TRIANGULATION_IMPL", "python")
+    with pytest.raises(RuntimeError, match="GEOM_CPP_TRIANGULATION_IMPL=python"):
+        _ = pwmb_geom.build_geometry(
+            contour_stack=stack,
+            max_layers=None,
+            max_vertices=None,
+            max_xy_stride=1,
+            include_fill=True,
+            metrics=None,
+        )
 
 
 def test_native_indexed_triangulation_payload_is_contiguous_when_available() -> None:

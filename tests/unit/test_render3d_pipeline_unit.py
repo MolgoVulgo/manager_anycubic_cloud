@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from pwmb_core.types import HeaderInfo, LayerDef, MachineInfo, PwmbDocument
@@ -440,6 +441,89 @@ def test_build_geometry_pipeline_smoothing_modifies_contours_before_geometry(tmp
     assert backend.geometry_contour_stack is result.contour_stack
     assert result.contour_stack is not source_stack
     assert result.contour_stack.layers[0].outer[0] != source_stack.layers[0].outer[0]
+
+
+def test_build_geometry_pipeline_simplify_epsilon_modifies_contours_before_geometry(tmp_path: Path) -> None:
+    path = tmp_path / "sample.pwmb"
+    path.write_bytes(b"pwmb")
+    document = _document(path)
+    dense_loop = []
+    for idx in range(80):
+        t = (2.0 * 3.141592653589793 * idx) / 80.0
+        dense_loop.append((float(np.cos(t) * 4.0), float(np.sin(t) * 2.0)))
+    source_stack = PwmbContourStack(
+        pitch_x_mm=0.05,
+        pitch_y_mm=0.05,
+        pitch_z_mm=0.05,
+        layers={0: LayerLoops(outer=[dense_loop], holes=[])},
+    )
+    geometry = _geometry()
+
+    class _SimplifyBackend:
+        name = "fake"
+
+        def __init__(self) -> None:
+            self.geometry_contour_stack: PwmbContourStack | None = None
+
+        def build_contours(self, _document, **_kwargs):  # type: ignore[no-untyped-def]
+            return source_stack
+
+        def build_geometry(self, contour_stack, **_kwargs):  # type: ignore[no-untyped-def]
+            self.geometry_contour_stack = contour_stack
+            return geometry
+
+    backend = _SimplifyBackend()
+    result = build_geometry_pipeline(
+        document,
+        threshold=1,
+        bin_mode="index_strict",
+        xy_stride=1,
+        simplify_epsilon=0.25,
+        max_xy_stride=1,
+        backend=backend,
+        cache=None,
+    )
+
+    assert backend.geometry_contour_stack is not None
+    assert backend.geometry_contour_stack is result.contour_stack
+    assert result.contour_stack is not source_stack
+    assert len(result.contour_stack.layers[0].outer[0]) < len(source_stack.layers[0].outer[0])
+
+
+def test_build_geometry_pipeline_contour_cache_reused_with_simplify_epsilon(tmp_path: Path) -> None:
+    path = tmp_path / "sample.pwmb"
+    path.write_bytes(b"pwmb")
+    document = _document(path)
+    stack = _stack()
+    geometry = _geometry()
+    backend = _FakeBackend(stack, geometry)
+    cache = BuildCache()
+
+    _ = build_geometry_pipeline(
+        document,
+        threshold=1,
+        bin_mode="index_strict",
+        xy_stride=1,
+        simplify_epsilon=0.0,
+        max_xy_stride=1,
+        backend=backend,
+        cache=cache,
+    )
+    backend.calls.clear()
+    result = build_geometry_pipeline(
+        document,
+        threshold=1,
+        bin_mode="index_strict",
+        xy_stride=1,
+        simplify_epsilon=0.2,
+        max_xy_stride=1,
+        backend=backend,
+        cache=cache,
+    )
+
+    assert result.contour_cache_hit is True
+    assert result.geometry_cache_hit is False
+    assert backend.calls == ["geometry"]
 
 
 def test_build_geometry_pipeline_cancels_before_backend_calls(tmp_path: Path) -> None:

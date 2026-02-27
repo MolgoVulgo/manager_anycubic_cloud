@@ -84,7 +84,7 @@ def _make_result(*, source_path: str, phase: str, include_fill: bool) -> dialog_
         source_path=source_path,
         phase=phase,
         include_fill=include_fill,
-        backend_name="python",
+        backend_name="cpp",
         xy_stride=1,
         z_stride=1,
         metrics=BuildMetrics(),

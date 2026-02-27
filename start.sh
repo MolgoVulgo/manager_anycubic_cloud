@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${ROOT_DIR}/.venv"
 DEPS_STAMP="${VENV_DIR}/.deps_installed"
-REQUIRED_IMPORTS="import PySide6, httpx, numpy"
+REQUIRED_IMPORTS="import PySide6, httpx, numpy, cv2"
+INSTALL_TARGET="${ROOT_DIR}[metrics]"
 SYSTEM_PYTHON="$(command -v python3 || true)"
 
 cd "${ROOT_DIR}"
@@ -31,7 +32,7 @@ if [ "${VENV_CAN_RUN}" -eq 0 ] && [ "${SYSTEM_CAN_RUN}" -eq 1 ]; then
 fi
 
 if [ ! -f "${DEPS_STAMP}" ] || [ "${ROOT_DIR}/pyproject.toml" -nt "${DEPS_STAMP}" ] || [ "${VENV_CAN_RUN}" -eq 0 ]; then
-  if pip install -e "${ROOT_DIR}"; then
+  if pip install -e "${INSTALL_TARGET}"; then
     touch "${DEPS_STAMP}"
   else
     echo "Warning: installation in .venv failed, trying system Python." >&2
@@ -46,5 +47,5 @@ if [ "${SYSTEM_CAN_RUN}" -eq 1 ]; then
   exec "${SYSTEM_PYTHON}" -m app_gui_qt.app "$@"
 fi
 
-echo "Error: missing dependencies (PySide6, httpx, numpy)." >&2
+echo "Error: missing dependencies (PySide6, httpx, numpy, cv2)." >&2
 exit 1

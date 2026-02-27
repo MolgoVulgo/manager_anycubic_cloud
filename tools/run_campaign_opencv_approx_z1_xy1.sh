@@ -4,7 +4,7 @@ set -euo pipefail
 # OpenCV approximation campaign on full quality:
 # - xy_stride=1
 # - z_stride=1
-# - python / cpp(native) / cpp(opencv:simple|tc89_l1|tc89_kcos)
+# - cpp(native) / cpp(opencv:simple|tc89_l1|tc89_kcos)
 # Then generate a consolidated summary focused on OpenCV approx variants.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,7 +18,6 @@ export PYTHONPATH=.
 
 mkdir -p "${REPORTS_DIR}"
 
-PYTHON_JSON="${REPORTS_DIR}/render3d_campaign_python_z1_xy1_lotK4.json"
 CPP_NATIVE_JSON="${REPORTS_DIR}/render3d_campaign_cpp_native_z1_xy1_lotK4.json"
 CPP_OPENCV_SIMPLE_JSON="${REPORTS_DIR}/render3d_campaign_cpp_opencv_simple_z1_xy1_lotK4.json"
 CPP_OPENCV_TC89_L1_JSON="${REPORTS_DIR}/render3d_campaign_cpp_opencv_tc89_l1_z1_xy1_lotK4.json"
@@ -28,16 +27,7 @@ SUMMARY_PREFIX="${REPORTS_DIR}/render3d_campaign_opencv_approx_summary_z1_xy1_lo
 echo "[campaign-lotK4] corpus=${CORPUS_DIR}"
 echo "[campaign-lotK4] reports=${REPORTS_DIR}"
 
-echo "[campaign-lotK4] step 1/6 python backend"
-python tools/render3d_baseline.py \
-  "${CORPUS_DIR}" \
-  --recursive \
-  --backend python \
-  --xy-stride 1 \
-  --z-stride 1 \
-  --output "${PYTHON_JSON}"
-
-echo "[campaign-lotK4] step 2/6 cpp backend (native contours)"
+echo "[campaign-lotK4] step 1/5 cpp backend (native contours)"
 python tools/render3d_baseline.py \
   "${CORPUS_DIR}" \
   --recursive \
@@ -47,7 +37,7 @@ python tools/render3d_baseline.py \
   --z-stride 1 \
   --output "${CPP_NATIVE_JSON}"
 
-echo "[campaign-lotK4] step 3/6 cpp backend (opencv simple)"
+echo "[campaign-lotK4] step 2/5 cpp backend (opencv simple)"
 python tools/render3d_baseline.py \
   "${CORPUS_DIR}" \
   --recursive \
@@ -58,7 +48,7 @@ python tools/render3d_baseline.py \
   --z-stride 1 \
   --output "${CPP_OPENCV_SIMPLE_JSON}"
 
-echo "[campaign-lotK4] step 4/6 cpp backend (opencv tc89_l1)"
+echo "[campaign-lotK4] step 3/5 cpp backend (opencv tc89_l1)"
 python tools/render3d_baseline.py \
   "${CORPUS_DIR}" \
   --recursive \
@@ -69,7 +59,7 @@ python tools/render3d_baseline.py \
   --z-stride 1 \
   --output "${CPP_OPENCV_TC89_L1_JSON}"
 
-echo "[campaign-lotK4] step 5/6 cpp backend (opencv tc89_kcos)"
+echo "[campaign-lotK4] step 4/5 cpp backend (opencv tc89_kcos)"
 python tools/render3d_baseline.py \
   "${CORPUS_DIR}" \
   --recursive \
@@ -80,9 +70,8 @@ python tools/render3d_baseline.py \
   --z-stride 1 \
   --output "${CPP_OPENCV_TC89_KCOS_JSON}"
 
-echo "[campaign-lotK4] step 6/6 summary generation"
+echo "[campaign-lotK4] step 5/5 summary generation"
 python tools/render3d_opencv_approx_summary.py \
-  --python-report "${PYTHON_JSON}" \
   --cpp-native-report "${CPP_NATIVE_JSON}" \
   --cpp-opencv-report "${CPP_OPENCV_SIMPLE_JSON}" --opencv-label simple \
   --cpp-opencv-report "${CPP_OPENCV_TC89_L1_JSON}" --opencv-label tc89_l1 \

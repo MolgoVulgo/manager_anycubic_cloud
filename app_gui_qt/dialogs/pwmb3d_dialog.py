@@ -343,6 +343,30 @@ def _select_preview_max_vertices(*, width: int, height: int, layer_count: int) -
     return 1_200_000
 
 
+def _select_preview_simplify_epsilon_mm(
+    *,
+    width: int,
+    height: int,
+    layer_count: int,
+    pixel_size_um: float,
+    quality_ratio: float,
+) -> float:
+    quality = max(0.05, min(1.0, float(quality_ratio)))
+    base_pitch_mm = (float(pixel_size_um) / 1000.0) if float(pixel_size_um) > 0.0 else 0.05
+    if quality >= 0.999:
+        return 0.0
+    if quality >= 0.66:
+        factor = 0.75
+    else:
+        factor = 1.50
+    complexity = max(0, int(width)) * max(0, int(height)) * max(1, int(layer_count))
+    if complexity >= 11_000_000_000:
+        factor *= 1.60
+    elif complexity >= 9_000_000_000:
+        factor *= 1.30
+    return max(0.0, float(base_pitch_mm) * float(factor))
+
+
 def _build_geometry_job(
     *,
     source_path: str,
@@ -401,6 +425,13 @@ def _build_geometry_job(
             max_vertices: int | None = None
             contour_extractor = _resolve_viewer_contour_extractor()
             contour_smoothing_iterations = 1
+            simplify_epsilon_mm = _select_preview_simplify_epsilon_mm(
+                width=document.width,
+                height=document.height,
+                layer_count=layer_count,
+                pixel_size_um=float(document.header.pixel_size_um),
+                quality_ratio=selected_quality_ratio,
+            )
 
             emit_event(
                 LOGGER_BUILD,
@@ -421,6 +452,7 @@ def _build_geometry_job(
                         "include_fill": bool(include_fill),
                         "contour_extractor": contour_extractor,
                         "contour_smoothing_iterations": contour_smoothing_iterations,
+                        "simplify_epsilon_mm": simplify_epsilon_mm,
                         "quality_ratio": selected_quality_ratio,
                         "sampled_layer_count": sampled_layer_count,
                         "document_layer_count": layer_count,
@@ -433,6 +465,7 @@ def _build_geometry_job(
                 "cache_contours_hit": (25, "cache"),
                 "decode": (22, "decode"),
                 "contours": (46, "contours"),
+                "simplify": (56, "geometry"),
                 "cache_geometry_lookup": (58, "cache"),
                 "cache_geometry_hit": (78, "cache"),
                 "geometry": (72, "geometry"),
@@ -454,6 +487,7 @@ def _build_geometry_job(
                 max_layers=sampled_layer_count,
                 max_vertices=max_vertices,
                 max_xy_stride=1,
+                simplify_epsilon=simplify_epsilon_mm,
                 include_fill=include_fill,
                 contour_extractor=contour_extractor,
                 contour_smoothing_iterations=contour_smoothing_iterations,
@@ -492,6 +526,7 @@ def _build_geometry_job(
                         "include_fill": bool(include_fill),
                         "contour_extractor": contour_extractor,
                         "contour_smoothing_iterations": contour_smoothing_iterations,
+                        "simplify_epsilon_mm": simplify_epsilon_mm,
                         "quality_ratio": selected_quality_ratio,
                         "sampled_layer_count": sampled_layer_count,
                         "document_layer_count": layer_count,
