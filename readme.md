@@ -1,6 +1,11 @@
-# Anycubic Cloud Client + PWMB 3D Viewer (Python / Qt / OpenGL)
+# Anycubic Cloud Client + PWMB 3D Viewer
 
-Python project that combines:
+> This repository is the legacy Python implementation.
+> **V3 is now available here:** https://github.com/MolgoVulgo/anycubic-cloud-manager-v3
+> The main V3 change is the migration from **Python to C++** to improve performance, runtime efficiency, and maintainability on the 3D/rendering pipeline.
+> Core features remain the same between this version and V3.
+
+This project combines:
 1) an **Anycubic Cloud client** (replaying the web UI calls),
 2) a **PWMB viewer** with **GPU-first 3D rendering** (OpenGL) and an **async CPU build pipeline** (threads/processes depending on the GIL and backend).
 

@@ -1,0 +1,600 @@
+{
+  "started_at": "2026-02-26T20:07:32+01:00",
+  "runs_requested": 1,
+  "strict_gates": false,
+  "config": {
+    "campaign_script": "/home/kaj/Develop/python/manager_anycubic_cloud/tools/run_campaign_z1_xy1.sh",
+    "corpus_dir": "/home/kaj/Develop/python/manager_anycubic_cloud/pwmb_files/cube.pwmb",
+    "reports_root": "/home/kaj/Develop/python/manager_anycubic_cloud/reports/scaling_validation_smoke_cube/workers_01/runs",
+    "workers": 1,
+    "parallel_policy": "python_fanout",
+    "sample_delay_s": 1.0,
+    "vmstat_seconds": 1,
+    "pidstat_seconds": 1,
+    "perf_seconds": 1,
+    "gate_max_si": 0.0,
+    "gate_max_so": 0.0,
+    "gate_max_majflt_s": 0.0,
+    "phase_detect_timeout_s": 120.0
+  },
+  "preflight": {
+    "tools": {
+      "taskset": true,
+      "ps": true,
+      "vmstat": true,
+      "pidstat": true,
+      "perf": true
+    },
+    "perf_sysctl": {
+      "perf_event_paranoid": 2,
+      "kptr_restrict": 0
+    },
+    "cpu_count": 32,
+    "python": "/usr/bin/python"
+  },
+  "runs": [
+    {
+      "run_index": 1,
+      "started_at": "2026-02-26T20:07:32+01:00",
+      "ended_at": "2026-02-26T20:07:53+01:00",
+      "campaign_command": [
+        "/home/kaj/Develop/python/manager_anycubic_cloud/tools/run_campaign_z1_xy1.sh",
+        "/home/kaj/Develop/python/manager_anycubic_cloud/pwmb_files/cube.pwmb",
+        "/home/kaj/Develop/python/manager_anycubic_cloud/reports/scaling_validation_smoke_cube/workers_01/runs/run_01",
+        "1",
+        "python_fanout"
+      ],
+      "campaign_returncode": 0,
+      "campaign_log": "/home/kaj/Develop/python/manager_anycubic_cloud/reports/scaling_validation_smoke_cube/workers_01/runs/run_01/campaign.log",
+      "reports_dir": "/home/kaj/Develop/python/manager_anycubic_cloud/reports/scaling_validation_smoke_cube/workers_01/runs/run_01",
+      "phases": {
+        "cpp_native": {
+          "captured": true,
+          "pid": 716032,
+          "captured_at": "2026-02-26T20:07:36+01:00",
+          "proc_status_subset": {
+            "Threads": "1",
+            "Cpus_allowed_list": "0-31"
+          },
+          "gate": {
+            "pass": false,
+            "reasons": [
+              "vmstat_max_si=56.000>0.000",
+              "vmstat_max_so=94.000>0.000"
+            ],
+            "thresholds": {
+              "max_si": 0.0,
+              "max_so": 0.0,
+              "max_majflt_s": 0.0
+            }
+          },
+          "diagnosis": {
+            "category": "memory_pressure",
+            "confidence": 1.0,
+            "scores": {
+              "memory_pressure": 6.0,
+              "gil_or_python_overhead": 3.0,
+              "native_serial_or_underutilized": 3.0
+            },
+            "evidence": [
+              "vmstat_max_si=56.000>0.000",
+              "vmstat_max_so=94.000>0.000",
+              "low_process_cpu=99.000",
+              "hot_threads=1",
+              "dominance_ratio=1.000"
+            ]
+          },
+          "vmstat_parsed": {
+            "samples": 1,
+            "max_si": 56.0,
+            "max_so": 94.0,
+            "avg_si": 56.0,
+            "avg_so": 94.0,
+            "avg_id": 91.0,
+            "min_id": 91.0
+          },
+          "pidstat_parsed": {
+            "avg_cpu": 99.0,
+            "avg_usr": 80.0,
+            "avg_system": 19.0,
+            "avg_minflt_s": 3810.0,
+            "avg_majflt_s": 0.0,
+            "avg_rss_kb": 118996,
+            "avg_mem_percent": 0.36
+          },
+          "snapshot": {
+            "captured_at": "2026-02-26T20:07:36+01:00",
+            "pid": 716032,
+            "affinity": {
+              "cmd": [
+                "taskset",
+                "-pc",
+                "716032"
+              ],
+              "returncode": 0,
+              "stdout": "pid 716032's current affinity list: 0-31\n",
+              "stderr": "",
+              "elapsed_s": 0.001,
+              "timed_out": false
+            },
+            "proc_status_subset": {
+              "Threads": "1",
+              "Cpus_allowed_list": "0-31"
+            },
+            "top_threads": {
+              "cmd": [
+                "ps",
+                "-L",
+                "-p",
+                "716032",
+                "-o",
+                "pid,tid,psr,pcpu,comm",
+                "--sort=-pcpu"
+              ],
+              "returncode": 0,
+              "stdout": "    PID     TID PSR %CPU COMMAND\n 716032  716032   0  100 python",
+              "stderr": "",
+              "elapsed_s": 0.027,
+              "timed_out": false
+            },
+            "top_threads_parsed": {
+              "samples": 1,
+              "hot_threads": 1,
+              "very_hot_threads": 1,
+              "max_thread_pcpu": 100.0,
+              "sum_thread_pcpu": 100.0,
+              "dominance_ratio": 1.0
+            },
+            "vmstat": {
+              "raw": {
+                "cmd": [
+                  "vmstat",
+                  "1",
+                  "1"
+                ],
+                "returncode": 0,
+                "stdout": "procs -----------memory---------- ---swap-- -----io---- -system-- -------cpu-------\n r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st gu\n 4  0 5731720 8025420 186932 6077016 56  94  1931   714 38827  17  8  1 91  0  0  0\n",
+                "stderr": "",
+                "elapsed_s": 0.002,
+                "timed_out": false
+              },
+              "parsed": {
+                "samples": 1,
+                "max_si": 56.0,
+                "max_so": 94.0,
+                "avg_si": 56.0,
+                "avg_so": 94.0,
+                "avg_id": 91.0,
+                "min_id": 91.0
+              }
+            },
+            "pidstat": {
+              "raw": {
+                "cmd": [
+                  "pidstat",
+                  "-r",
+                  "-u",
+                  "-p",
+                  "716032",
+                  "1",
+                  "1"
+                ],
+                "returncode": 0,
+                "stdout": "Linux 6.18.9-arch1-2 (Green-Kid) \t02/26/26 \t_x86_64_\t(32 CPU)\n\n20:07:34      UID       PID    %usr %system  %guest   %wait    %CPU   CPU  Command\n20:07:35     1000    716032   80.00   19.00    0.00    0.00   99.00    16  python\n\n20:07:34      UID       PID  minflt/s  majflt/s     VSZ     RSS   %MEM  Command\n20:07:35     1000    716032   3810.00      0.00  198632  118996   0.36  python\n\nAverage:      UID       PID    %usr %system  %guest   %wait    %CPU   CPU  Command\nAverage:     1000    716032   80.00   19.00    0.00    0.00   99.00     -  python\n\nAverage:      UID       PID  minflt/s  majflt/s     VSZ     RSS   %MEM  Command\nAverage:     1000    716032   3810.00      0.00  198632  118996   0.36  python\n",
+                "stderr": "",
+                "elapsed_s": 1.001,
+                "timed_out": false
+              },
+              "parsed": {
+                "avg_cpu": 99.0,
+                "avg_usr": 80.0,
+                "avg_system": 19.0,
+                "avg_minflt_s": 3810.0,
+                "avg_majflt_s": 0.0,
+                "avg_rss_kb": 118996,
+                "avg_mem_percent": 0.36
+              }
+            },
+            "perf_top": {
+              "cmd": [
+                "perf",
+                "top",
+                "-p",
+                "716032"
+              ],
+              "returncode": null,
+              "stdout": "\u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716032)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display fi\n...[truncated 77908291 chars]",
+              "stderr": "",
+              "elapsed_s": 1.052,
+              "timed_out": true
+            },
+            "perf_top_parsed": {
+              "available": true,
+              "restricted": false,
+              "py_hot_hits": 0,
+              "native_hot_hits": 0,
+              "top_symbols": []
+            },
+            "env_parallel": {},
+            "cv2_probe": {
+              "ok": true,
+              "stdout": "opencv threads: 32\nopencv cpus: 32\n",
+              "stderr": "",
+              "threads": 32,
+              "cpus": 32
+            },
+            "native_module_info": {
+              "probe": {
+                "cmd": [
+                  "/usr/bin/python",
+                  "-c",
+                  "import pwmb_geom; print('pwmb_geom_file=' + str(pwmb_geom.__file__)); import pwmb_geom._pwmb_geom as m; print('_pwmb_geom_file=' + str(m.__file__))"
+                ],
+                "returncode": 0,
+                "stdout": "pwmb_geom_file=/home/kaj/Develop/python/manager_anycubic_cloud/pwmb_geom/__init__.py\n_pwmb_geom_file=/home/kaj/Develop/python/manager_anycubic_cloud/pwmb_geom/_pwmb_geom.cpython-314-x86_64-linux-gnu.so\n",
+                "stderr": "",
+                "elapsed_s": 0.247,
+                "timed_out": false
+              },
+              "module_path": "/home/kaj/Develop/python/manager_anycubic_cloud/pwmb_geom/_pwmb_geom.cpython-314-x86_64-linux-gnu.so",
+              "ldd_filtered": [
+                "libtbb.so.12 => /usr/lib/libtbb.so.12 (0x00007f2718575000)"
+              ],
+              "ldd": {
+                "cmd": [
+                  "ldd",
+                  "/home/kaj/Develop/python/manager_anycubic_cloud/pwmb_geom/_pwmb_geom.cpython-314-x86_64-linux-gnu.so"
+                ],
+                "returncode": 0,
+                "stdout": "\tlinux-vdso.so.1 (0x00007f271b364000)\n\tlibopencv_imgproc.so.413 => /usr/lib/libopencv_imgproc.so.413 (0x00007f2719600000)\n\tlibopencv_core.so.413 => /usr/lib/libopencv_core.so.413 (0x00007f2718600000)\n\tlibstdc++.so.6 => /usr/lib/libstdc++.so.6 (0x00007f2718200000)\n\tlibm.so.6 => /usr/lib/libm.so.6 (0x00007f27194e2000)\n\tlibgcc_s.so.1 => /usr/lib/libgcc_s.so.1 (0x00007f271b2b0000)\n\tlibc.so.6 => /usr/lib/libc.so.6 (0x00007f271800f000)\n\t/usr/lib64/ld-linux-x86-64.so.2 (0x00007f271b366000)\n\tlibz.so.1 => /usr/lib/libz.so.1 (0x00007f271b293000)\n\tlibGL.so.1 => /usr/lib/libGL.so.1 (0x00007f271b221000)\n\tliblapack.so.3 => /usr/lib/liblapack.so.3 (0x00007f2717000000)\n\tlibcblas.so.3 => /usr/lib/libcblas.so.3 (0x00007f27185c9000)\n\tlibtbb.so.12 => /usr/lib/libtbb.so.12 (0x00007f2718575000)\n\tlibGLdispatch.so.0 => /usr/lib/libGLdispatch.so.0 (0x00007f27184fc000)\n\tlibGLX.so.0 => /usr/lib/libGLX.so.0 (0x00007f27184cb000)\n\tlibblas.so.3 => /usr/lib/libblas.so.3 (0x00007f2717f51000)\n\tlibgfortran.so.5 => /usr/lib/libgfortran.so.5 (0x00007f2716c00000)\n\tlibX11.so.6 => /usr/lib/libX11.so.6 (0x00007f2716abe000)\n\tlibxcb.so.1 => /usr/lib/libxcb.so.1 (0x00007f27184a0000)\n\tlibXau.so.6 => /usr/lib/libXau.so.6 (0x00007f271b218000)\n\tlibXdmcp.so.6 => /usr/lib/libXdmcp.so.6 (0x00007f271b210000)\n",
+                "stderr": "",
+                "elapsed_s": 0.005,
+                "timed_out": false
+              }
+            },
+            "gate": {
+              "pass": false,
+              "reasons": [
+                "vmstat_max_si=56.000>0.000",
+                "vmstat_max_so=94.000>0.000"
+              ],
+              "thresholds": {
+                "max_si": 0.0,
+                "max_so": 0.0,
+                "max_majflt_s": 0.0
+              }
+            },
+            "diagnosis": {
+              "category": "memory_pressure",
+              "confidence": 1.0,
+              "scores": {
+                "memory_pressure": 6.0,
+                "gil_or_python_overhead": 3.0,
+                "native_serial_or_underutilized": 3.0
+              },
+              "evidence": [
+                "vmstat_max_si=56.000>0.000",
+                "vmstat_max_so=94.000>0.000",
+                "low_process_cpu=99.000",
+                "hot_threads=1",
+                "dominance_ratio=1.000"
+              ]
+            }
+          }
+        },
+        "cpp_opencv": {
+          "captured": true,
+          "pid": 716118,
+          "captured_at": "2026-02-26T20:07:45+01:00",
+          "proc_status_subset": {
+            "Threads": "32",
+            "Cpus_allowed_list": "0-31"
+          },
+          "gate": {
+            "pass": false,
+            "reasons": [
+              "vmstat_max_si=56.000>0.000",
+              "vmstat_max_so=94.000>0.000"
+            ],
+            "thresholds": {
+              "max_si": 0.0,
+              "max_so": 0.0,
+              "max_majflt_s": 0.0
+            }
+          },
+          "diagnosis": {
+            "category": "memory_pressure",
+            "confidence": 1.0,
+            "scores": {
+              "memory_pressure": 6.0,
+              "gil_or_python_overhead": 2.0,
+              "native_serial_or_underutilized": 2.0
+            },
+            "evidence": [
+              "vmstat_max_si=56.000>0.000",
+              "vmstat_max_so=94.000>0.000",
+              "hot_threads=1",
+              "dominance_ratio=1.000"
+            ]
+          },
+          "vmstat_parsed": {
+            "samples": 1,
+            "max_si": 56.0,
+            "max_so": 94.0,
+            "avg_si": 56.0,
+            "avg_so": 94.0,
+            "avg_id": 91.0,
+            "min_id": 91.0
+          },
+          "pidstat_parsed": {
+            "avg_cpu": 279.21,
+            "avg_usr": 222.77,
+            "avg_system": 56.44,
+            "avg_minflt_s": 28791.09,
+            "avg_majflt_s": 0.0,
+            "avg_rss_kb": 203236,
+            "avg_mem_percent": 0.62
+          },
+          "snapshot": {
+            "captured_at": "2026-02-26T20:07:45+01:00",
+            "pid": 716118,
+            "affinity": {
+              "cmd": [
+                "taskset",
+                "-pc",
+                "716118"
+              ],
+              "returncode": 0,
+              "stdout": "pid 716118's current affinity list: 0-31\n",
+              "stderr": "",
+              "elapsed_s": 0.001,
+              "timed_out": false
+            },
+            "proc_status_subset": {
+              "Threads": "32",
+              "Cpus_allowed_list": "0-31"
+            },
+            "top_threads": {
+              "cmd": [
+                "ps",
+                "-L",
+                "-p",
+                "716118",
+                "-o",
+                "pid,tid,psr,pcpu,comm",
+                "--sort=-pcpu"
+              ],
+              "returncode": 0,
+              "stdout": "    PID     TID PSR %CPU COMMAND\n 716118  716118   0  264 python",
+              "stderr": "",
+              "elapsed_s": 0.027,
+              "timed_out": false
+            },
+            "top_threads_parsed": {
+              "samples": 1,
+              "hot_threads": 1,
+              "very_hot_threads": 1,
+              "max_thread_pcpu": 264.0,
+              "sum_thread_pcpu": 264.0,
+              "dominance_ratio": 1.0
+            },
+            "vmstat": {
+              "raw": {
+                "cmd": [
+                  "vmstat",
+                  "1",
+                  "1"
+                ],
+                "returncode": 0,
+                "stdout": "procs -----------memory---------- ---swap-- -----io---- -system-- -------cpu-------\n r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st gu\n 2  0 5730436 5972252 186964 6092492 56  94  1931   714 38821  17  8  1 91  0  0  0\n",
+                "stderr": "",
+                "elapsed_s": 0.002,
+                "timed_out": false
+              },
+              "parsed": {
+                "samples": 1,
+                "max_si": 56.0,
+                "max_so": 94.0,
+                "avg_si": 56.0,
+                "avg_so": 94.0,
+                "avg_id": 91.0,
+                "min_id": 91.0
+              }
+            },
+            "pidstat": {
+              "raw": {
+                "cmd": [
+                  "pidstat",
+                  "-r",
+                  "-u",
+                  "-p",
+                  "716118",
+                  "1",
+                  "1"
+                ],
+                "returncode": 0,
+                "stdout": "Linux 6.18.9-arch1-2 (Green-Kid) \t02/26/26 \t_x86_64_\t(32 CPU)\n\n20:07:43      UID       PID    %usr %system  %guest   %wait    %CPU   CPU  Command\n20:07:44     1000    716118  222.77   56.44    0.00    0.00  279.21     0  python\n\n20:07:43      UID       PID  minflt/s  majflt/s     VSZ     RSS   %MEM  Command\n20:07:44     1000    716118  28791.09      0.00 2458796  203236   0.62  python\n\nAverage:      UID       PID    %usr %system  %guest   %wait    %CPU   CPU  Command\nAverage:     1000    716118  222.77   56.44    0.00    0.00  279.21     -  python\n\nAverage:      UID       PID  minflt/s  majflt/s     VSZ     RSS   %MEM  Command\nAverage:     1000    716118  28791.09      0.00 2458796  203236   0.62  python\n",
+                "stderr": "",
+                "elapsed_s": 1.003,
+                "timed_out": false
+              },
+              "parsed": {
+                "avg_cpu": 279.21,
+                "avg_usr": 222.77,
+                "avg_system": 56.44,
+                "avg_minflt_s": 28791.09,
+                "avg_majflt_s": 0.0,
+                "avg_rss_kb": 203236,
+                "avg_mem_percent": 0.62
+              }
+            },
+            "perf_top": {
+              "cmd": [
+                "perf",
+                "top",
+                "-p",
+                "716118"
+              ],
+              "returncode": null,
+              "stdout": "\u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display filter (percent). \t(5%)\n\t[s]     annotate symbol.                   \t(NULL)\n\t[S]     stop annotation.\n\t[K]     hide kernel symbols.             \t(no)\n\t[U]     hide user symbols.               \t(no)\n\t[z]     toggle sample zeroing.             \t(0)\n\t[qQ]    quit.\n\nEnter selection, or unmapped key to continue: \u001b[H\u001b[2J\n   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [4000Hz cpu/cycles/Pu],  (target_pid: 716118)\n-------------------------------------------------------------------------------\n\n\nMapped keys:\n\t[d]     display refresh delay.             \t(2)\n\t[e]     display entries (lines).           \t(20)\n\t[f]     profile display filter (count).    \t(5)\n\t[F]     annotate display fi\n...[truncated 69611185 chars]",
+              "stderr": "",
+              "elapsed_s": 1.043,
+              "timed_out": true
+            },
+            "perf_top_parsed": {
+              "available": true,
+              "restricted": false,
+              "py_hot_hits": 0,
+              "native_hot_hits": 0,
+              "top_symbols": []
+            },
+            "env_parallel": {},
+            "cv2_probe": {
+              "ok": true,
+              "stdout": "opencv threads: 32\nopencv cpus: 32\n",
+              "stderr": "",
+              "threads": 32,
+              "cpus": 32
+            },
+            "native_module_info": {
+              "probe": {
+                "cmd": [
+                  "/usr/bin/python",
+                  "-c",
+                  "import pwmb_geom; print('pwmb_geom_file=' + str(pwmb_geom.__file__)); import pwmb_geom._pwmb_geom as m; print('_pwmb_geom_file=' + str(m.__file__))"
+                ],
+                "returncode": 0,
+                "stdout": "pwmb_geom_file=/home/kaj/Develop/python/manager_anycubic_cloud/pwmb_geom/__init__.py\n_pwmb_geom_file=/home/kaj/Develop/python/manager_anycubic_cloud/pwmb_geom/_pwmb_geom.cpython-314-x86_64-linux-gnu.so\n",
+                "stderr": "",
+                "elapsed_s": 0.241,
+                "timed_out": false
+              },
+              "module_path": "/home/kaj/Develop/python/manager_anycubic_cloud/pwmb_geom/_pwmb_geom.cpython-314-x86_64-linux-gnu.so",
+              "ldd_filtered": [
+                "libtbb.so.12 => /usr/lib/libtbb.so.12 (0x00007fbff6b75000)"
+              ],
+              "ldd": {
+                "cmd": [
+                  "ldd",
+                  "/home/kaj/Develop/python/manager_anycubic_cloud/pwmb_geom/_pwmb_geom.cpython-314-x86_64-linux-gnu.so"
+                ],
+                "returncode": 0,
+                "stdout": "\tlinux-vdso.so.1 (0x00007fbff995f000)\n\tlibopencv_imgproc.so.413 => /usr/lib/libopencv_imgproc.so.413 (0x00007fbff7c00000)\n\tlibopencv_core.so.413 => /usr/lib/libopencv_core.so.413 (0x00007fbff6c00000)\n\tlibstdc++.so.6 => /usr/lib/libstdc++.so.6 (0x00007fbff6800000)\n\tlibm.so.6 => /usr/lib/libm.so.6 (0x00007fbff7ae2000)\n\tlibgcc_s.so.1 => /usr/lib/libgcc_s.so.1 (0x00007fbff98ab000)\n\tlibc.so.6 => /usr/lib/libc.so.6 (0x00007fbff660f000)\n\t/usr/lib64/ld-linux-x86-64.so.2 (0x00007fbff9961000)\n\tlibz.so.1 => /usr/lib/libz.so.1 (0x00007fbff988e000)\n\tlibGL.so.1 => /usr/lib/libGL.so.1 (0x00007fbff981c000)\n\tliblapack.so.3 => /usr/lib/liblapack.so.3 (0x00007fbff5600000)\n\tlibcblas.so.3 => /usr/lib/libcblas.so.3 (0x00007fbff6bc9000)\n\tlibtbb.so.12 => /usr/lib/libtbb.so.12 (0x00007fbff6b75000)\n\tlibGLdispatch.so.0 => /usr/lib/libGLdispatch.so.0 (0x00007fbff6afc000)\n\tlibGLX.so.0 => /usr/lib/libGLX.so.0 (0x00007fbff6acb000)\n\tlibblas.so.3 => /usr/lib/libblas.so.3 (0x00007fbff6551000)\n\tlibgfortran.so.5 => /usr/lib/libgfortran.so.5 (0x00007fbff5200000)\n\tlibX11.so.6 => /usr/lib/libX11.so.6 (0x00007fbff50be000)\n\tlibxcb.so.1 => /usr/lib/libxcb.so.1 (0x00007fbff6aa0000)\n\tlibXau.so.6 => /usr/lib/libXau.so.6 (0x00007fbff9813000)\n\tlibXdmcp.so.6 => /usr/lib/libXdmcp.so.6 (0x00007fbff6a98000)\n",
+                "stderr": "",
+                "elapsed_s": 0.006,
+                "timed_out": false
+              }
+            },
+            "gate": {
+              "pass": false,
+              "reasons": [
+                "vmstat_max_si=56.000>0.000",
+                "vmstat_max_so=94.000>0.000"
+              ],
+              "thresholds": {
+                "max_si": 0.0,
+                "max_so": 0.0,
+                "max_majflt_s": 0.0
+              }
+            },
+            "diagnosis": {
+              "category": "memory_pressure",
+              "confidence": 1.0,
+              "scores": {
+                "memory_pressure": 6.0,
+                "gil_or_python_overhead": 2.0,
+                "native_serial_or_underutilized": 2.0
+              },
+              "evidence": [
+                "vmstat_max_si=56.000>0.000",
+                "vmstat_max_so=94.000>0.000",
+                "hot_threads=1",
+                "dominance_ratio=1.000"
+              ]
+            }
+          }
+        }
+      },
+      "summary": {
+        "summary_json": "/home/kaj/Develop/python/manager_anycubic_cloud/reports/scaling_validation_smoke_cube/workers_01/runs/run_01/render3d_campaign_summary_z1_xy1.json",
+        "workers_effective": {
+          "cpp_native": 1,
+          "cpp_opencv": 1
+        },
+        "cpp_native_total_wall_ms": 9202.375000000002,
+        "cpp_opencv_total_wall_ms": 11735.179999999998,
+        "cpp_native_total_cpu_ms": 9199.012,
+        "cpp_opencv_total_cpu_ms": 11675.442,
+        "cpp_native_contours_wall_ms_total": 9198.432,
+        "cpp_opencv_contours_wall_ms_total": 11731.286,
+        "cpp_native_triangulation_wall_ms_total": 2.68,
+        "cpp_opencv_triangulation_wall_ms_total": 2.659,
+        "speedups": {
+          "cpp_native_vs_opencv_total_x": 1.2752338390904518,
+          "cpp_native_vs_opencv_total_cpu_x": 1.2692060843055752,
+          "cpp_native_vs_opencv_contours_x": 1.2881716714112794,
+          "cpp_native_vs_opencv_triangulation_x": 0.9921641791044775
+        }
+      },
+      "resource_summary": {
+        "avg_process_cpu_percent": 189.105,
+        "avg_machine_idle_percent": 91.0,
+        "max_vmstat_si": 56.0,
+        "max_vmstat_so": 94.0,
+        "avg_pidstat_majflt_s": 0.0
+      },
+      "gate_pass": false,
+      "gate_reasons": [
+        "cpp_native:vmstat_max_si=56.000>0.000,vmstat_max_so=94.000>0.000",
+        "cpp_opencv:vmstat_max_si=56.000>0.000,vmstat_max_so=94.000>0.000"
+      ],
+      "diagnosis": {
+        "category": "memory_pressure",
+        "confidence": 1.0,
+        "diagnostic_gate_pass": true,
+        "per_phase": {
+          "cpp_native": {
+            "category": "memory_pressure",
+            "confidence": 1.0,
+            "evidence": [
+              "vmstat_max_si=56.000>0.000",
+              "vmstat_max_so=94.000>0.000",
+              "low_process_cpu=99.000",
+              "hot_threads=1",
+              "dominance_ratio=1.000"
+            ]
+          },
+          "cpp_opencv": {
+            "category": "memory_pressure",
+            "confidence": 1.0,
+            "evidence": [
+              "vmstat_max_si=56.000>0.000",
+              "vmstat_max_so=94.000>0.000",
+              "hot_threads=1",
+              "dominance_ratio=1.000"
+            ]
+          }
+        },
+        "evidence": [
+          "cpp_native:vmstat_max_si=56.000>0.000",
+          "cpp_native:vmstat_max_so=94.000>0.000",
+          "cpp_native:low_process_cpu=99.000",
+          "cpp_native:hot_threads=1",
+          "cpp_native:dominance_ratio=1.000",
+          "cpp_opencv:vmstat_max_si=56.000>0.000",
+          "cpp_opencv:vmstat_max_so=94.000>0.000",
+          "cpp_opencv:hot_threads=1",
+          "cpp_opencv:dominance_ratio=1.000"
+        ]
+      },
+      "diagnostic_gate_pass": true
+    }
+  ],
+  "ended_at": "2026-02-26T20:07:53+01:00",
+  "comparable_run_indices": [],
+  "diagnostic_comparable_run_indices": [
+    1
+  ],
+  "report_json": "/home/kaj/Develop/python/manager_anycubic_cloud/reports/scaling_validation_smoke_cube/workers_01/measurement_protocol.json",
+  "report_md": "/home/kaj/Develop/python/manager_anycubic_cloud/reports/scaling_validation_smoke_cube/workers_01/measurement_protocol.md"
+}

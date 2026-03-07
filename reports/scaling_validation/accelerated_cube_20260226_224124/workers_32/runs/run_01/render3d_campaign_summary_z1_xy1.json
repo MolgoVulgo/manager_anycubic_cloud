@@ -1,0 +1,82 @@
+{
+  "protocol": {
+    "scope_files": [
+      "cube.pwmb"
+    ],
+    "z_stride": 1,
+    "xy_stride": 1,
+    "bin_mode": "index_strict",
+    "threshold": 1
+  },
+  "aggregate": {
+    "cpp_native": {
+      "parse_ms_total": 0.675,
+      "decode_ms_total": 253957.193,
+      "contours_ms_total": 57793.08,
+      "triangulation_ms_total": 4.181,
+      "contours_wall_ms_total": 12926.803,
+      "triangulation_wall_ms_total": 8.622,
+      "buffers_ms_total": 0.021,
+      "total_cpu_ms": 311754.475,
+      "total_wall_ms": 12936.121,
+      "total_ms": 12936.121,
+      "loops_total": 200,
+      "triangles_total": 400,
+      "vertices_total": 3600,
+      "layers_total": 200,
+      "layers_built": 200,
+      "layers_skipped": 0
+    },
+    "cpp_opencv": {
+      "parse_ms_total": 0.645,
+      "decode_ms_total": 299390.369,
+      "contours_ms_total": 47993.635,
+      "triangulation_ms_total": 3.534,
+      "contours_wall_ms_total": 14473.09,
+      "triangulation_wall_ms_total": 7.982,
+      "buffers_ms_total": 0.037,
+      "total_cpu_ms": 347387.575,
+      "total_wall_ms": 14481.754,
+      "total_ms": 14481.754,
+      "loops_total": 200,
+      "triangles_total": 400,
+      "vertices_total": 3600,
+      "layers_total": 200,
+      "layers_built": 200,
+      "layers_skipped": 0
+    }
+  },
+  "speedups": {
+    "cpp_native_vs_opencv_total_x": 1.119481952897627,
+    "cpp_native_vs_opencv_total_cpu_x": 1.114298599883771,
+    "cpp_native_vs_opencv_contours_x": 0.8304391286984532,
+    "cpp_native_vs_opencv_triangulation_x": 0.8452523319779957
+  },
+  "per_file": [
+    {
+      "file": "cube.pwmb",
+      "cpp_native_total_ms": 12936.121,
+      "cpp_native_total_wall_ms": 12936.121,
+      "cpp_native_total_cpu_ms": 311754.475,
+      "cpp_opencv_total_ms": 14481.754,
+      "cpp_opencv_total_wall_ms": 14481.754,
+      "cpp_opencv_total_cpu_ms": 347387.575,
+      "opencv_vs_native": {
+        "contour_area_delta_mm2": 0.0,
+        "mesh_area_delta_mm2": 0.0,
+        "contour_bbox_delta_max": 0.0,
+        "mesh_bbox_delta_max": 0.0,
+        "triangle_count_delta": 0,
+        "loops_total_delta": 0,
+        "triangulation_ms_delta": -0.6470000000000002,
+        "triangulation_wall_ms_delta": -0.6399999999999997,
+        "contours_ms_delta": -9799.445,
+        "contours_wall_ms_delta": 1546.2870000000003,
+        "decode_ms_delta": 45433.17600000001,
+        "total_cpu_ms_delta": 35633.100000000035,
+        "total_wall_ms_delta": 1545.6330000000016,
+        "total_ms_delta": 1545.6330000000016
+      }
+    }
+  ]
+}

@@ -8,7 +8,7 @@ Lot C implements phase C from `docs/40_update_to_cpp.md`:
 
 Current status:
 - contours extraction path can be native when `_pwmb_geom` is built,
-- geometry triangulation remains Python (`build_geometry_v2`) in this lot.
+- geometry triangulation is now native C++ in the active pipeline.
 - functional fixes applied after lot C (PW0 adaptive decode, cutoff observability) are tracked in `docs/44_CORRECTIONS_FONCTIONNELLES.md`.
 - optional OpenCV contour extractor planning is tracked in `docs/45_LOT_D_OPENCV_OPTION.md`.
 
@@ -28,8 +28,7 @@ Current status:
 - `build_contours(...)`: calls `render3d_core.contours.build_contour_stack(...)` with native pixel extractor.
 - `build_geometry(...)`: delegates to `render3d_core.geometry_v2.build_geometry_v2(...)`.
 
-If `_pwmb_geom` is missing, importing `pwmb_geom` raises `ImportError`, so:
-- `GEOM_BACKEND=cpp` cleanly falls back to `python` backend.
+If `_pwmb_geom` is missing, importing `pwmb_geom` raises `ImportError` and render3d fails fast (no Python fallback).
 
 ## Build native module
 
@@ -49,13 +48,13 @@ cmake --install pwmb_geom_cpp/build --prefix "$(python -c \"import sysconfig; pr
 
 ## Validation commands
 
-Baseline (python):
+Baseline (cpp):
 
 ```bash
-PYTHONPATH=. python tools/render3d_baseline.py <pwmb_or_dir> --recursive --backend python
+PYTHONPATH=. python tools/render3d_baseline.py <pwmb_or_dir> --recursive --backend cpp
 ```
 
-Comparison python vs cpp:
+Comparison cpp(native) vs cpp(candidate):
 
 ```bash
 PYTHONPATH=. python tools/render3d_compare_backends.py <pwmb_or_dir> --recursive --xy-stride 1 --area-tol 1e-3

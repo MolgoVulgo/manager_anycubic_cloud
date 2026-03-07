@@ -1,8 +1,8 @@
 # 41_lot_a_baseline — Baseline + contrat backend (phase A)
 
 ## Objectif
-Mettre en place une base de mesure stable avant migration C++:
-- un backend geometrique selectionnable (`python` / `cpp`),
+Mettre en place une base de mesure stable sur backend C++:
+- un backend geometrique `cpp` unique,
 - des invariants geometriques automatiques,
 - un outil de baseline sur corpus PWMB.
 
@@ -13,10 +13,9 @@ Module: `render3d_core/backend.py`
   - `build_contours(document, threshold, binarization_mode, xy_stride, metrics)`
   - `build_geometry(contour_stack, max_layers, max_vertices, max_xy_stride, metrics)`
 - Selection:
-  - variable d'environnement `GEOM_BACKEND=python|cpp`
-  - fallback automatique vers `python` si `cpp` indisponible.
+  - variable d'environnement `GEOM_BACKEND=cpp` (backend unique).
 
-Ce contrat permet d'introduire un backend C++ sans toucher l'orchestration GUI.
+Ce contrat permet de conserver l'orchestration GUI avec un backend natif unique.
 
 ## Invariants geometriques
 Module: `render3d_core/invariants.py`
@@ -39,10 +38,10 @@ Exemple:
 PYTHONPATH=. python tools/render3d_baseline.py \
   ./corpus_pwmb \
   --recursive \
-  --backend python \
+  --backend cpp \
   --threshold 1 \
   --bin-mode index_strict \
-  --output .accloud/baseline/render3d_baseline_python.json
+  --output .accloud/baseline/render3d_baseline_cpp.json
 ```
 
 Options utiles:
@@ -56,6 +55,6 @@ Sortie JSON:
 - signature fichier pour tracer le corpus.
 
 ## Validation minimale recommandee
-1. Lancer baseline en `python` sur le corpus de reference.
+1. Lancer baseline en `cpp` sur le corpus de reference.
 2. Conserver le JSON comme reference de non-regression.
 3. Rejouer exactement la meme commande apres chaque lot C++.

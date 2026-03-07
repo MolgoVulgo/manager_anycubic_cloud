@@ -67,8 +67,11 @@ py::dict extract_polygons_py(
     const int width = static_cast<int>(info.shape[1]);
     const pwmb_geom::ContourImpl selected_impl = parse_impl(impl);
     const pwmb_geom::OpenCvApprox selected_approx = parse_opencv_approx(opencv_approx);
-    const pwmb_geom::PolygonSet polygons =
-        pwmb_geom::extract_polygons(data, width, height, selected_impl, selected_approx);
+    pwmb_geom::PolygonSet polygons;
+    {
+        py::gil_scoped_release release;
+        polygons = pwmb_geom::extract_polygons(data, width, height, selected_impl, selected_approx);
+    }
 
     py::dict payload;
     payload["outer"] = polygons.outer;
@@ -101,7 +104,11 @@ py::list triangulate_polygon_with_holes_py(const py::object& raw_outer, const py
     for (const py::handle hole_handle : holes_seq) {
         holes.push_back(parse_loop(py::reinterpret_borrow<py::object>(hole_handle)));
     }
-    const std::vector<pwmb_geom::Triangle2d> triangles = pwmb_geom::triangulate_polygon_with_holes(outer, holes);
+    std::vector<pwmb_geom::Triangle2d> triangles;
+    {
+        py::gil_scoped_release release;
+        triangles = pwmb_geom::triangulate_polygon_with_holes(outer, holes);
+    }
     py::list payload;
     for (const auto& triangle : triangles) {
         py::list tri;
@@ -147,7 +154,11 @@ py::dict triangulate_polygon_with_holes_indexed_py(
     for (const py::handle hole_handle : holes_seq) {
         holes.push_back(parse_loop(py::reinterpret_borrow<py::object>(hole_handle)));
     }
-    const std::vector<pwmb_geom::Triangle2d> triangles = pwmb_geom::triangulate_polygon_with_holes(outer, holes);
+    std::vector<pwmb_geom::Triangle2d> triangles;
+    {
+        py::gil_scoped_release release;
+        triangles = pwmb_geom::triangulate_polygon_with_holes(outer, holes);
+    }
 
     std::vector<float> vertices;
     std::vector<std::uint32_t> indices;

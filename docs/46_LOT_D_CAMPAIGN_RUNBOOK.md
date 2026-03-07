@@ -4,8 +4,7 @@
 Documenter la procedure standard pour lancer la campagne corpus complete en qualite max:
 - `xy_stride=1`
 - `z_stride=1`
-- comparaison des 3 backends:
-  - `python`
+- comparaison des 2 variantes C++:
   - `cpp(native)`
   - `cpp(opencv)`
 
@@ -40,18 +39,14 @@ Exemple:
 ```
 
 ## Etapes executees par le script
-1. baseline `python`:
-   - `tools/render3d_baseline.py`
-   - `--backend python --xy-stride 1 --z-stride 1`
-2. baseline `cpp(native)`:
+1. baseline `cpp(native)`:
    - `--backend cpp --cpp-contours-impl native`
-3. baseline `cpp(opencv)`:
+2. baseline `cpp(opencv)`:
    - `--backend cpp --cpp-contours-impl opencv`
-4. consolidation:
+3. consolidation:
    - `tools/render3d_campaign_summary.py`
 
 ## Fichiers de sortie attendus
-- `reports/render3d_campaign_python_z1_xy1.json`
 - `reports/render3d_campaign_cpp_native_z1_xy1.json`
 - `reports/render3d_campaign_cpp_opencv_z1_xy1.json`
 - `reports/render3d_campaign_summary_z1_xy1.json`
